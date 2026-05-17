@@ -4,7 +4,7 @@
 #SBATCH --output=.logs/epiplexity_%j.out
 
 # Source environment
-source ~/.bashrc  # or ~/.zshrc depending on your shell
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate ~/miniconda3/envs/dllm 
 
 PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 python -m epiplexity.llada_sft_epiplexity \
