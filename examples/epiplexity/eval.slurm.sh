@@ -2,6 +2,8 @@
 #SBATCH --job-name=dllm-epiplexity-sampler
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --mem=32G
 
 set -euo pipefail
 
@@ -46,7 +48,7 @@ declare -A ALL_TASKS=(
     # ["mbpp"]="mbpp --num_fewshot 3 --confirm_run_unsafe_code"
 )
 
-base_model_args="pretrained=${model_name_or_path},max_new_tokens=512,steps=64,block_size=64,cfg_scale=0.0"
+base_model_args="pretrained=${model_name_or_path},max_new_tokens=256,steps=64,block_size=64,cfg_scale=0.0"
 model_args="${base_model_args},sampler_type=${sampler_type}"
 
 for task_key in "${!ALL_TASKS[@]}"; do
@@ -65,7 +67,8 @@ for task_key in "${!ALL_TASKS[@]}"; do
         --apply_chat_template \
         --tasks ${task_args} \
         --model_args "${model_args}" \
-        --output_path "${output_dir}/${sampler_type}/${task_key}"
+        --output_path "${output_dir}/${sampler_type}/${task_key}" \
+        --use_cache "${output_dir}/${sampler_type}/${task_key}.cache"
 done
 
 echo -e "\n\nAll evaluations completed!"

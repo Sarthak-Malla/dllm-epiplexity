@@ -172,6 +172,9 @@ class BaseEvalHarness(LM):
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
 
+            # garbage collect between batches to avoid OOMs; only necessary if we're not using accelerator.prepare() for the model.
+            torch.cuda.empty_cache()
+
         return out
 
     def loglikelihood(self, requests):

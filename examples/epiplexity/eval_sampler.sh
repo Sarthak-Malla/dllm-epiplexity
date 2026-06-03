@@ -34,7 +34,7 @@ declare -A ALL_TASKS=(
     # ["mbpp"]="mbpp --num_fewshot 3 --confirm_run_unsafe_code"
 )
 
-base_model_args="pretrained=${model_name_or_path},max_new_tokens=512,steps=64,block_size=64,cfg_scale=0.0"
+base_model_args="pretrained=${model_name_or_path},max_new_tokens=256,steps=64,block_size=64,cfg_scale=0.0"
 model_args="${base_model_args},sampler_type=${sampler_type}"
 
 for task_key in "${!ALL_TASKS[@]}"; do

@@ -1,3 +1,11 @@
+"""
+Collect oracle epiplexity training data.
+
+Run from the repo root:
+  source ~/.zshrc && conda activate ~/miniconda3/envs/dllm
+  python /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/collect_data.py
+"""
+
 import os
 import math
 import torch
@@ -76,12 +84,14 @@ class DataCollectingOracleSampler(OracleEpiplexitySampler):
 
         for b in range(num_blocks):
             block_mask_index = torch.zeros((B, block_size), dtype=torch.bool, device=x.device)
+            block_span_mask = torch.zeros_like(x, dtype=torch.bool)
 
             for j in range(B):
                 start = prompt_lens[j] + b * block_size
                 end = min(start + block_size, prompt_lens[j] + max_new_tokens, T)
                 if start < end:
                     block_mask_index[j, :end - start] = (x[j, start:end] == mask_id)
+                    block_span_mask[j, start:end] = True
 
             num_transfer_tokens = get_num_transfer_tokens(
                 mask_index=block_mask_index,
@@ -93,10 +103,12 @@ class DataCollectingOracleSampler(OracleEpiplexitySampler):
             effective_steps = num_transfer_tokens.size(1)
 
             for i in range(effective_steps):
-                num_transfer = num_transfer_tokens[:, i].item()
-                if num_transfer == 0: continue
+                num_transfer = num_transfer_tokens[:, i]
+                if torch.all(num_transfer == 0):
+                    continue
                 
                 mask_index = x == mask_id
+                current_block_mask = mask_index & block_span_mask
 
                 if cfg_scale > 0.0:
                     un_x = x.clone()
@@ -129,36 +141,26 @@ class DataCollectingOracleSampler(OracleEpiplexitySampler):
 
                 p = F.softmax(logits, dim=-1)
                 x0_p = torch.squeeze(torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)
-                confidence = torch.where(mask_index, x0_p, -float('inf'))
+                confidence = torch.where(current_block_mask, x0_p, -float('inf'))
 
                 # --- ORACLE LOOKAHEAD LOGIC ---
                 candidates = self.generate_candidate_sets(
-                    confidence, mask_index, num_transfer, strategy=oracle_candidate_strategy
+                    confidence, current_block_mask, num_transfer, strategy=oracle_candidate_strategy
                 )
                 
                 base_entropy_map = self.get_entropy_per_token(logits)
-                best_structure_gain = -float('inf')
-                best_c_idx = None
-                
+                best_c_idx, structure_gains = self._select_best_candidate(
+                    x=x,
+                    x0=x0,
+                    mask_index=mask_index,
+                    candidates=candidates,
+                    attention_mask=attention_mask,
+                    base_entropy_map=base_entropy_map,
+                )
                 step_structure_gains = {}
-
-                for c_name, c_idx in candidates.items():
-                    c_lookahead = x.clone()
-                    c_lookahead[c_idx] = x0[c_idx]
-                    c_new_mask = mask_index & (~c_idx)
-                    
-                    # 1-step lookahead forward pass
-                    la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
-                    
-                    la_ent_c = (self.get_entropy_per_token(la_logits) * c_new_mask).sum(dim=-1).item()
-                    base_ent_c = (base_entropy_map * c_new_mask).sum(dim=-1).item()
-                    
-                    structure_gain = base_ent_c - la_ent_c
-                    step_structure_gains[c_name] = structure_gain
-                        
-                    if structure_gain > best_structure_gain:
-                        best_structure_gain = structure_gain
-                        best_c_idx = c_idx
+                for c_name, gain in structure_gains.items():
+                    gain = gain.detach().cpu()
+                    step_structure_gains[c_name] = gain.item() if gain.numel() == 1 else gain.tolist()
                 
                 # Record details of this diffusion step
                 self.collected_data.append({

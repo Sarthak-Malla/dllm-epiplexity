@@ -1,3 +1,11 @@
+"""
+Oracle epiplexity sampler.
+
+Run via eval entrypoints, for example:
+  source ~/.zshrc && conda activate ~/miniconda3/envs/dllm
+  bash /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/eval_sampler.sh --sampler_type oracle
+"""
+
 import math
 import torch
 import torch.nn.functional as F
@@ -10,10 +18,10 @@ from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 
 @dataclass
 class OracleEpiplexitySamplerConfig(MDLMSamplerConfig):
-    # Number of candidates to evaluate at each step
-    num_oracle_candidates: int = 4
+    # # Number of candidates to evaluate at each step
+    # num_oracle_candidates: int = 4
     # The heuristic for generating candidate masks
-    # "mixed" generates top-entropy, top-confidence, and spaced anchors
+    # "mixed" generates top-entropy and spaced anchors
     oracle_candidate_strategy: str = "mixed"
 
 class OracleEpiplexitySampler(MDLMSampler):
@@ -21,6 +29,8 @@ class OracleEpiplexitySampler(MDLMSampler):
     Epiplexity Oracle Sampler.
     Uses a 1-step lookahead to evaluate candidate sets of unmasked tokens based on their "Structure Gain".
     Structure Gain proxy = Expected baseline future entropy - Lookahead future entropy.
+
+    This uses Entropy Drop as the epiplexity proxy, which is not quite the proxy we want.
     """
     
     def get_entropy_per_token(self, logits: torch.Tensor) -> torch.Tensor:
@@ -33,7 +43,7 @@ class OracleEpiplexitySampler(MDLMSampler):
         self, 
         confidence: torch.Tensor, 
         mask_idx: torch.Tensor, 
-        num_transfer: int, 
+        num_transfer: Union[int, List[int], torch.Tensor],
         strategy: str = "mixed"
     ) -> Dict[str, torch.Tensor]:
         """
@@ -41,58 +51,124 @@ class OracleEpiplexitySampler(MDLMSampler):
         Returns a dictionary of boolean tensors matching mask_idx shape.
         """
         B, T = mask_idx.shape
-        candidates = {}
+        num_transfer = self._normalize_num_transfer(num_transfer, B, mask_idx.device)
+
+        if strategy == "mixed":
+            candidate_names = ["greedy", "spaced_0", "spaced_1"]
+        elif strategy == "greedy":
+            candidate_names = ["greedy"]
+        elif strategy == "high_entropy":
+            candidate_names = ["high_entropy"]
+        elif strategy == "random":
+            candidate_names = ["random"]
+        else:
+            raise ValueError(f"Unknown oracle_candidate_strategy: {strategy}")
+
+        candidates = {
+            name: torch.zeros_like(mask_idx, dtype=torch.bool)
+            for name in candidate_names
+        }
         
         for b in range(B):
-            batch_conf = confidence[b]
+            valid_indices = torch.where(mask_idx[b])[0]
+            num_valid = valid_indices.numel()
+            k = int(num_transfer[b].item())
+            k = max(0, min(k, num_valid))
+            if k == 0:
+                continue
+
+            batch_conf = torch.where(mask_idx[b], confidence[b], -torch.inf)
             
             if strategy == "mixed" or strategy == "greedy":
                 # Candidate: Greedy (Highest confidence)
-                _, greedy_idx = torch.topk(batch_conf, k=num_transfer)
-                greedy_mask = torch.zeros_like(mask_idx[b], dtype=torch.bool)
-                greedy_mask[greedy_idx] = True
-                candidates['greedy'] = greedy_mask.unsqueeze(0)
+                _, greedy_idx = torch.topk(batch_conf, k=k)
+                candidates["greedy"][b, greedy_idx] = True
             
-            if strategy == "mixed" or strategy == "high_entropy":
+            # if strategy == "mixed" or strategy == "high_entropy":
+            if strategy == "high_entropy":
                 # Candidate: High Entropy (Lowest confidence)
-                inv_conf = torch.where(mask_idx[b], -batch_conf, -torch.inf) 
-                _, high_ent_idx = torch.topk(inv_conf, k=num_transfer)
-                high_ent_mask = torch.zeros_like(mask_idx[b], dtype=torch.bool)
-                high_ent_mask[high_ent_idx] = True
-                candidates['high_entropy'] = high_ent_mask.unsqueeze(0)
+                inv_conf = torch.where(mask_idx[b], -confidence[b], -torch.inf)
+                _, high_ent_idx = torch.topk(inv_conf, k=k)
+                candidates["high_entropy"][b, high_ent_idx] = True
 
             if strategy == "mixed":
                 # Candidates: Deterministic Spaced Anchors
-                valid_indices = torch.where(mask_idx[b])[0]
-                step = max(1, len(valid_indices) // num_transfer)
-                
-                # generate up to 2 different spread patterns
-                for offset in range(min(step, 2)):
-                    spaced_mask = torch.zeros_like(mask_idx[b], dtype=torch.bool)
-                    selected_idx = valid_indices[offset::step][:num_transfer]
+                for offset in range(2):
+                    # Create evenly spaced floating point indices across the span
+                    # Shift the second pattern by half a step size
+                    step_float = num_valid / k
+                    start_offset = (offset * step_float) / 2
                     
-                    if len(selected_idx) < num_transfer:
-                        needed = num_transfer - len(selected_idx)
-                        mask_not_selected = torch.ones_like(valid_indices, dtype=torch.bool)
-                        mask_not_selected[offset::step][:num_transfer] = False
-                        extra_idx = valid_indices[mask_not_selected][:needed]
-                        selected_idx = torch.cat([selected_idx, extra_idx])
-                        
-                    spaced_mask[selected_idx] = True
-                    candidates[f'spaced_{offset}'] = spaced_mask.unsqueeze(0)
+                    # Compute integer indices
+                    float_indices = torch.arange(k, device=valid_indices.device) * step_float + start_offset
+                    int_indices = float_indices.long().clamp(max=num_valid - 1)
+                    
+                    selected_idx = valid_indices[int_indices]
+                    candidates[f"spaced_{offset}"][b, selected_idx] = True
 
             if strategy == "random":
                 # Baseline for structure gain definition
-                valid_indices = torch.where(mask_idx[b])[0]
-                rand_idx = valid_indices[torch.randperm(len(valid_indices))[:num_transfer]]
-                rand_mask = torch.zeros_like(mask_idx[b], dtype=torch.bool)
-                rand_mask[rand_idx] = True
-                candidates['random'] = rand_mask.unsqueeze(0)
+                rand_idx = valid_indices[torch.randperm(num_valid, device=valid_indices.device)[:k]]
+                candidates["random"][b, rand_idx] = True
 
-        # Extend dictionary to batched structure (assuming B=1 for simplicity, 
-        # but correctly stacking for larger batches requires list of dicts transpose)
-        # Assuming homogeneous candidate names across batch elements (B=1 commonly in our loop)
         return candidates
+
+    def _normalize_num_transfer(
+        self,
+        num_transfer: Union[int, List[int], torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Normalize scalar or per-row transfer counts to a [B] tensor."""
+        if isinstance(num_transfer, torch.Tensor):
+            transfer = num_transfer.to(device=device, dtype=torch.long).flatten()
+        elif isinstance(num_transfer, int):
+            transfer = torch.full((batch_size,), num_transfer, device=device, dtype=torch.long)
+        else:
+            transfer = torch.as_tensor(num_transfer, device=device, dtype=torch.long).flatten()
+
+        if transfer.numel() == 1 and batch_size > 1:
+            transfer = transfer.expand(batch_size)
+        if transfer.numel() != batch_size:
+            raise ValueError(
+                f"num_transfer must be scalar or length {batch_size}, got {transfer.numel()}"
+            )
+        return transfer
+
+    def _select_best_candidate(
+        self,
+        x: torch.Tensor,
+        x0: torch.Tensor,
+        mask_index: torch.Tensor,
+        candidates: Dict[str, torch.Tensor],
+        attention_mask: torch.Tensor,
+        base_entropy_map: torch.Tensor,
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Evaluate lookahead candidates and select the best mask per batch row."""
+        B = x.shape[0]
+        best_structure_gain = torch.full((B,), -torch.inf, device=x.device)
+        best_c_idx = torch.zeros_like(mask_index, dtype=torch.bool)
+        structure_gains = {}
+
+        for c_name, c_idx in candidates.items():
+            c_lookahead = x.clone()
+            c_lookahead[c_idx] = x0[c_idx]
+            c_new_mask = mask_index & (~c_idx)
+
+            # 1-step lookahead forward pass
+            la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
+
+            la_ent_c = (self.get_entropy_per_token(la_logits) * c_new_mask).sum(dim=-1)
+            base_ent_c = (base_entropy_map * c_new_mask).sum(dim=-1)
+
+            entropy_drop = base_ent_c - la_ent_c
+            structure_gains[c_name] = entropy_drop
+
+            improved = entropy_drop > best_structure_gain
+            best_structure_gain = torch.where(improved, entropy_drop, best_structure_gain)
+            best_c_idx = torch.where(improved.unsqueeze(-1), c_idx, best_c_idx)
+
+        return best_c_idx, structure_gains
 
     @torch.no_grad()
     def sample(
@@ -161,12 +237,14 @@ class OracleEpiplexitySampler(MDLMSampler):
 
         for b in range(num_blocks):
             block_mask_index = torch.zeros((B, block_size), dtype=torch.bool, device=x.device)
+            block_span_mask = torch.zeros_like(x, dtype=torch.bool)
 
             for j in range(B):
                 start = prompt_lens[j] + b * block_size
                 end = min(start + block_size, prompt_lens[j] + max_new_tokens, T)
                 if start < end:
                     block_mask_index[j, :end - start] = (x[j, start:end] == mask_id)
+                    block_span_mask[j, start:end] = True
 
             num_transfer_tokens = get_num_transfer_tokens(
                 mask_index=block_mask_index,
@@ -178,10 +256,12 @@ class OracleEpiplexitySampler(MDLMSampler):
             effective_steps = num_transfer_tokens.size(1)
 
             for i in range(effective_steps):
-                num_transfer = num_transfer_tokens[:, i].item() # Assuming B=1 or homogenous transfers
-                if num_transfer == 0: continue
+                num_transfer = num_transfer_tokens[:, i]
+                if torch.all(num_transfer == 0):
+                    continue
                 
                 mask_index = x == mask_id
+                current_block_mask = mask_index & block_span_mask
 
                 if cfg_scale > 0.0:
                     un_x = x.clone()
@@ -209,41 +289,22 @@ class OracleEpiplexitySampler(MDLMSampler):
 
                 p = F.softmax(logits, dim=-1)
                 x0_p = torch.squeeze(torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)
-                confidence = torch.where(mask_index, x0_p, -float('inf'))
+                confidence = torch.where(current_block_mask, x0_p, -float('inf'))
 
                 # --- ORACLE LOOKAHEAD LOGIC ---
                 candidates = self.generate_candidate_sets(
-                    confidence, mask_index, num_transfer, strategy=oracle_candidate_strategy
+                    confidence, current_block_mask, num_transfer, strategy=oracle_candidate_strategy
                 )
                 
                 base_entropy_map = self.get_entropy_per_token(logits)
-                best_structure_gain = -float('inf')
-                best_c_idx = None
-                best_la_ent = None
-                
-                random_candidate_idx = candidates.get('random', list(candidates.values())[0])
-
-                for c_name, c_idx in candidates.items():
-                    c_lookahead = x.clone()
-                    c_lookahead[c_idx] = x0[c_idx]
-                    c_new_mask = mask_index & (~c_idx)
-                    
-                    # 1-step lookahead forward pass
-                    la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
-                    
-                    la_ent_c = (self.get_entropy_per_token(la_logits) * c_new_mask).sum(dim=-1).item()
-                    base_ent_c = (base_entropy_map * c_new_mask).sum(dim=-1).item()
-                    
-                    entropy_drop = base_ent_c - la_ent_c
-                    # For a true comparison, we proxy structure gain as the absolute entropy drop 
-                    # from the set, normalized by how much random would drop. 
-                    # (Here we simplify just tracking absolute drop since all candidates have |U| tokens).
-                    structure_gain = entropy_drop
-                        
-                    if structure_gain > best_structure_gain:
-                        best_structure_gain = structure_gain
-                        best_c_idx = c_idx
-                        best_la_ent = la_ent_c
+                best_c_idx, _ = self._select_best_candidate(
+                    x=x,
+                    x0=x0,
+                    mask_index=mask_index,
+                    candidates=candidates,
+                    attention_mask=attention_mask,
+                    base_entropy_map=base_entropy_map,
+                )
                 
                 # Apply the best candidate
                 x[best_c_idx] = x0[best_c_idx]
