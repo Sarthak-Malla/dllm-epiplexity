@@ -7,6 +7,7 @@ from lm_eval.api.registry import register_model
 from dllm.core.eval import MDLMEvalConfig, MDLMEvalHarness
 from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
 from dllm.core.samplers.epiplexity_oracle import OracleEpiplexitySampler, OracleEpiplexitySamplerConfig
+from dllm.core.samplers.epiplexity_risk import RiskEpiplexitySampler, RiskEpiplexitySamplerConfig
 from dllm.core.samplers.epiplexity_guided import GuidedEpiplexitySampler, GuidedEpiplexitySamplerConfig
 
 
@@ -36,6 +37,11 @@ class LLaDAEpiplexityEvalHarness(MDLMEvalHarness):
             oracle_candidate_strategy = kwargs.pop("oracle_candidate_strategy", "mixed")
             sampler_config = OracleEpiplexitySamplerConfig(oracle_candidate_strategy=oracle_candidate_strategy)
             
+        elif sampler_type == "risk":
+            sampler_cls = RiskEpiplexitySampler
+            risk_candidate_strategy = kwargs.pop("risk_candidate_strategy", "mixed")
+            sampler_config = RiskEpiplexitySamplerConfig(risk_candidate_strategy=risk_candidate_strategy)
+
         elif sampler_type == "guided":
             sampler_cls = GuidedEpiplexitySampler
             guide_temperature = float(kwargs.pop("guide_temperature", 1.0))
