@@ -9,6 +9,7 @@ from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
 from dllm.core.samplers.epiplexity_oracle import OracleEpiplexitySampler, OracleEpiplexitySamplerConfig
 from dllm.core.samplers.epiplexity_risk import RiskEpiplexitySampler, RiskEpiplexitySamplerConfig
 from dllm.core.samplers.epiplexity_guided import GuidedEpiplexitySampler, GuidedEpiplexitySamplerConfig
+from dllm.core.samplers.epiplexity_spaced import SpacedEpiplexitySampler, SpacedEpiplexitySamplerConfig
 
 
 @dataclass
@@ -50,6 +51,10 @@ class LLaDAEpiplexityEvalHarness(MDLMEvalHarness):
             # TODO: We need to load the guide_model here, but for now we expect it passed or we load a dummy/default checkpoint
             # For this evaluation script placeholder, we'll let it run without guide_model (which falls back to confidence) 
             # if we haven't trained one yet.
+        elif sampler_type in ("spaced_0", "spaced_1"):
+            sampler_cls = SpacedEpiplexitySampler
+            spaced_offset = int(sampler_type.rsplit("_", 1)[1])
+            sampler_config = SpacedEpiplexitySamplerConfig(spaced_offset=spaced_offset)
         else:
             sampler_cls = MDLMSampler
             sampler_config = LLaDAEvalSamplerConfig()

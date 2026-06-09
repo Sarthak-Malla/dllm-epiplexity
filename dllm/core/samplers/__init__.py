@@ -4,6 +4,7 @@ from .mdlm import MDLMSampler, MDLMSamplerConfig
 from .epiplexity_oracle import OracleEpiplexitySampler, OracleEpiplexitySamplerConfig
 from .epiplexity_risk import RiskEpiplexitySampler, RiskEpiplexitySamplerConfig
 from .epiplexity_guided import GuidedEpiplexitySampler, GuidedEpiplexitySamplerConfig
+from .epiplexity_spaced import SpacedEpiplexitySampler, SpacedEpiplexitySamplerConfig
 from .utils import add_gumbel_noise, get_num_transfer_tokens
 
 __all__ = [
@@ -20,6 +21,8 @@ __all__ = [
     "RiskEpiplexitySamplerConfig",
     "GuidedEpiplexitySampler",
     "GuidedEpiplexitySamplerConfig",
+    "SpacedEpiplexitySampler",
+    "SpacedEpiplexitySamplerConfig",
     "add_gumbel_noise",
     "get_num_transfer_tokens",
 ]

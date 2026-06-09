@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+nvidia-smi
+
 mkdir -p .logs
 
 # ===== Environment =====
@@ -68,7 +70,7 @@ for task_key in "${!ALL_TASKS[@]}"; do
         --tasks ${task_args} \
         --model_args "${model_args}" \
         --output_path "${output_dir}/${sampler_type}/${task_key}" \
-        --use_cache "${output_dir}/${sampler_type}/${task_key}.cache"
+        --use_cache "${output_dir}/${sampler_type}/${task_key}_without_greedy.cache"
 done
 
 echo -e "\n\nAll evaluations completed!"

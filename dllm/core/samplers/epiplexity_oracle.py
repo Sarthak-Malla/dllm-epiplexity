@@ -54,7 +54,7 @@ class OracleEpiplexitySampler(MDLMSampler):
         num_transfer = self._normalize_num_transfer(num_transfer, B, mask_idx.device)
 
         if strategy == "mixed":
-            candidate_names = ["greedy", "spaced_0", "spaced_1"]
+            candidate_names = ["spaced_0", "spaced_1"]
         elif strategy == "greedy":
             candidate_names = ["greedy"]
         elif strategy == "high_entropy":
@@ -79,7 +79,8 @@ class OracleEpiplexitySampler(MDLMSampler):
 
             batch_conf = torch.where(mask_idx[b], confidence[b], -torch.inf)
             
-            if strategy == "mixed" or strategy == "greedy":
+            # if strategy == "mixed" or strategy == "greedy":
+            if strategy == "greedy":
                 # Candidate: Greedy (Highest confidence)
                 _, greedy_idx = torch.topk(batch_conf, k=k)
                 candidates["greedy"][b, greedy_idx] = True

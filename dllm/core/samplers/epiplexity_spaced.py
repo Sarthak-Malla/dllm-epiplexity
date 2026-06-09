@@ -1,14 +1,15 @@
 """
-Decoding-risk epiplexity sampler.
+No-lookahead spaced epiplexity ablation sampler.
 
 Run via eval entrypoints, for example:
   source ~/.zshrc && conda activate ~/miniconda3/envs/dllm
-  bash /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/eval_risk.slurm.sh
+  SAMPLER_TYPE=spaced_0 bash /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/eval.slurm.sh
+  SAMPLER_TYPE=spaced_1 bash /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/eval.slurm.sh
 """
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -19,55 +20,32 @@ from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 
 
 @dataclass
-class RiskEpiplexitySamplerConfig(MDLMSamplerConfig):
-    # The heuristic for generating candidate masks.
-    risk_candidate_strategy: str = "mixed"
+class SpacedEpiplexitySamplerConfig(MDLMSamplerConfig):
+    spaced_offset: int = 0
 
 
-class RiskEpiplexitySampler(MDLMSampler):
+class SpacedEpiplexitySampler(MDLMSampler):
     """
-    Epiplexity sampler using held-out decoding-risk reduction as the verifier.
+    No-lookahead ablation that commits deterministic spaced positions.
 
-    For each candidate reveal set U, the sampler reveals the current model
-    predictions at U, runs one lookahead pass, and selects the candidate that
-    most reduces 1 - max probability on the positions still masked after U.
+    The sampler keeps MDLM's normal token prediction and scheduling, but replaces
+    confidence top-k unmasking with either the spaced_0 or spaced_1 candidate
+    pattern used by the epiplexity candidate generators.
     """
 
-    def get_decoding_risk_per_token(self, logits: torch.Tensor) -> torch.Tensor:
-        """Calculate decoding risk, 1 - max probability, for each position [B, T]."""
-        max_probs = F.softmax(logits, dim=-1).amax(dim=-1)
-        return 1.0 - max_probs
-
-    def generate_candidate_sets(
+    def _select_spaced_transfer_index(
         self,
-        confidence: torch.Tensor,
         mask_idx: torch.Tensor,
         num_transfer: Union[int, List[int], torch.Tensor],
-        strategy: str = "mixed",
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Generate different sets of token indices to reveal (U).
-        Returns a dictionary of boolean tensors matching mask_idx shape.
-        """
+        spaced_offset: int,
+    ) -> torch.Tensor:
+        """Select evenly spaced masked positions for each batch row."""
+        if spaced_offset not in (0, 1):
+            raise ValueError(f"spaced_offset must be 0 or 1, got {spaced_offset}")
+
         B, _ = mask_idx.shape
         num_transfer = self._normalize_num_transfer(num_transfer, B, mask_idx.device)
-
-        if strategy == "mixed":
-            # candidate_names = ["greedy", "spaced_0", "spaced_1"]
-            candidate_names = ["spaced_0", "spaced_1"]
-        elif strategy == "greedy":
-            candidate_names = ["greedy"]
-        elif strategy == "high_entropy":
-            candidate_names = ["high_entropy"]
-        elif strategy == "random":
-            candidate_names = ["random"]
-        else:
-            raise ValueError(f"Unknown risk_candidate_strategy: {strategy}")
-
-        candidates = {
-            name: torch.zeros_like(mask_idx, dtype=torch.bool)
-            for name in candidate_names
-        }
+        transfer_index = torch.zeros_like(mask_idx, dtype=torch.bool)
 
         for b in range(B):
             valid_indices = torch.where(mask_idx[b])[0]
@@ -77,36 +55,17 @@ class RiskEpiplexitySampler(MDLMSampler):
             if k == 0:
                 continue
 
-            batch_conf = torch.where(mask_idx[b], confidence[b], -torch.inf)
+            step_float = num_valid / k
+            start_offset = (spaced_offset * step_float) / 2
+            float_indices = (
+                torch.arange(k, device=valid_indices.device) * step_float
+                + start_offset
+            )
+            int_indices = float_indices.long().clamp(max=num_valid - 1)
+            selected_idx = valid_indices[int_indices]
+            transfer_index[b, selected_idx] = True
 
-            if strategy == "greedy":
-                _, greedy_idx = torch.topk(batch_conf, k=k)
-                candidates["greedy"][b, greedy_idx] = True
-
-            if strategy == "high_entropy":
-                inv_conf = torch.where(mask_idx[b], -confidence[b], -torch.inf)
-                _, high_ent_idx = torch.topk(inv_conf, k=k)
-                candidates["high_entropy"][b, high_ent_idx] = True
-
-            if strategy == "mixed":
-                for offset in range(2):
-                    step_float = num_valid / k
-                    start_offset = (offset * step_float) / 2
-                    float_indices = (
-                        torch.arange(k, device=valid_indices.device) * step_float
-                        + start_offset
-                    )
-                    int_indices = float_indices.long().clamp(max=num_valid - 1)
-                    selected_idx = valid_indices[int_indices]
-                    candidates[f"spaced_{offset}"][b, selected_idx] = True
-
-            if strategy == "random":
-                rand_idx = valid_indices[
-                    torch.randperm(num_valid, device=valid_indices.device)[:k]
-                ]
-                candidates["random"][b, rand_idx] = True
-
-        return candidates
+        return transfer_index
 
     def _normalize_num_transfer(
         self,
@@ -134,52 +93,15 @@ class RiskEpiplexitySampler(MDLMSampler):
             )
         return transfer
 
-    def _select_best_candidate(
-        self,
-        x: torch.Tensor,
-        x0: torch.Tensor,
-        mask_index: torch.Tensor,
-        candidates: Dict[str, torch.Tensor],
-        attention_mask: torch.Tensor,
-        base_risk_map: torch.Tensor,
-    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Evaluate lookahead candidates and select the best mask per batch row."""
-        B = x.shape[0]
-        best_risk_reduction = torch.full((B,), -torch.inf, device=x.device)
-        best_c_idx = torch.zeros_like(mask_index, dtype=torch.bool)
-        risk_reductions = {}
-
-        for c_name, c_idx in candidates.items():
-            c_lookahead = x.clone()
-            c_lookahead[c_idx] = x0[c_idx]
-            heldout_mask = mask_index & (~c_idx)
-
-            la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
-            la_risk = (
-                self.get_decoding_risk_per_token(la_logits) * heldout_mask
-            ).sum(dim=-1)
-            base_risk = (base_risk_map * heldout_mask).sum(dim=-1)
-
-            risk_reduction = base_risk - la_risk
-            risk_reductions[c_name] = risk_reduction
-
-            improved = risk_reduction > best_risk_reduction
-            best_risk_reduction = torch.where(
-                improved, risk_reduction, best_risk_reduction
-            )
-            best_c_idx = torch.where(improved.unsqueeze(-1), c_idx, best_c_idx)
-
-        return best_c_idx, risk_reductions
-
     @torch.no_grad()
     def sample(
         self,
         inputs: List[Union[torch.Tensor, List[int]]],
-        config: Optional[RiskEpiplexitySamplerConfig] = None,
+        config: Optional[SpacedEpiplexitySamplerConfig] = None,
         **kwargs,
     ) -> Union[BaseSamplerOutput, torch.Tensor]:
         if config is None:
-            config = RiskEpiplexitySamplerConfig()
+            config = SpacedEpiplexitySamplerConfig()
 
         steps = kwargs.get("steps", config.steps)
         max_new_tokens = kwargs.get("max_new_tokens", config.max_new_tokens)
@@ -188,6 +110,7 @@ class RiskEpiplexitySampler(MDLMSampler):
         temperature = kwargs.get("temperature", config.temperature)
         cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
         cfg_keep_tokens = kwargs.get("cfg_keep_tokens", config.cfg_keep_tokens)
+        remasking = kwargs.get("remasking", config.remasking)
         suppress_tokens = kwargs.get("suppress_tokens", config.suppress_tokens)
         stochastic_transfer = kwargs.get(
             "stochastic_transfer", config.stochastic_transfer
@@ -197,9 +120,9 @@ class RiskEpiplexitySampler(MDLMSampler):
         begin_suppress_tokens = kwargs.get(
             "begin_suppress_tokens", config.begin_suppress_tokens
         )
-        risk_candidate_strategy = kwargs.get(
-            "risk_candidate_strategy", config.risk_candidate_strategy
-        )
+        spaced_offset = int(kwargs.get("spaced_offset", config.spaced_offset))
+        if spaced_offset not in (0, 1):
+            raise ValueError(f"spaced_offset must be 0 or 1, got {spaced_offset}")
 
         assert 1 <= block_size
         assert 1 <= steps
@@ -239,7 +162,7 @@ class RiskEpiplexitySampler(MDLMSampler):
             attention_mask[i, :valid_end] = 1
 
         unmasked_index = (x != mask_id) & attention_mask.bool()
-        if cfg_keep_tokens and len(cfg_keep_tokens) > 0:
+        if not (cfg_keep_tokens is None or len(cfg_keep_tokens) == 0):
             keep_mask = torch.isin(
                 x, torch.as_tensor(cfg_keep_tokens, device=self.model.device)
             )
@@ -291,7 +214,7 @@ class RiskEpiplexitySampler(MDLMSampler):
                 else:
                     logits = self.model(x, attention_mask=attention_mask).logits
 
-                if suppress_tokens and len(suppress_tokens) > 0:
+                if suppress_tokens is not None and len(suppress_tokens) > 0:
                     for token_id in suppress_tokens:
                         logits[:, :, token_id] = -torch.inf
 
@@ -301,36 +224,27 @@ class RiskEpiplexitySampler(MDLMSampler):
                 logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
                 x0 = torch.argmax(logits_with_noise, dim=-1)
 
-                if begin_suppress_tokens and len(begin_suppress_tokens) > 0:
+                if begin_suppress_tokens is not None and len(begin_suppress_tokens) > 0:
                     for token_id in begin_suppress_tokens:
                         logits[:, :, token_id] = -torch.inf
 
-                p = F.softmax(logits, dim=-1)
-                x0_p = torch.squeeze(
-                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                )
-                confidence = torch.where(current_block_mask, x0_p, -float("inf"))
+                if remasking == "low_confidence":
+                    p = F.softmax(logits, dim=-1)
+                    _ = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+                elif remasking == "random":
+                    _ = torch.rand((B, T), device=self.model.device)
+                else:
+                    raise NotImplementedError(remasking)
 
-                candidates = self.generate_candidate_sets(
-                    confidence,
+                x0 = torch.where(mask_index, x0, x)
+                transfer_index = self._select_spaced_transfer_index(
                     current_block_mask,
                     num_transfer,
-                    strategy=risk_candidate_strategy,
+                    spaced_offset=spaced_offset,
                 )
 
-                base_risk_map = self.get_decoding_risk_per_token(logits)
-                best_c_idx, _ = self._select_best_candidate(
-                    x=x,
-                    x0=x0,
-                    mask_index=mask_index,
-                    candidates=candidates,
-                    attention_mask=attention_mask,
-                    base_risk_map=base_risk_map,
-                )
-
-                x[best_c_idx] = x0[best_c_idx]
-
-                if return_dict:
+                x[transfer_index] = x0[transfer_index]
+                if histories is not None:
                     histories.append(x.clone())
 
         if return_dict:
