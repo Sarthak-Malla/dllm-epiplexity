@@ -1,5 +1,6 @@
 *.db
 eval_results/
+examples/epiplexity/epipath_prompt_md/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -5,6 +5,7 @@ from .epiplexity_oracle import OracleEpiplexitySampler, OracleEpiplexitySamplerC
 from .epiplexity_risk import RiskEpiplexitySampler, RiskEpiplexitySamplerConfig
 from .epiplexity_guided import GuidedEpiplexitySampler, GuidedEpiplexitySamplerConfig
 from .epiplexity_spaced import SpacedEpiplexitySampler, SpacedEpiplexitySamplerConfig
+from .epipath import EpiPathSampler, EpiPathSamplerConfig
 from .utils import add_gumbel_noise, get_num_transfer_tokens
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "GuidedEpiplexitySamplerConfig",
     "SpacedEpiplexitySampler",
     "SpacedEpiplexitySamplerConfig",
+    "EpiPathSampler",
+    "EpiPathSamplerConfig",
     "add_gumbel_noise",
     "get_num_transfer_tokens",
 ]

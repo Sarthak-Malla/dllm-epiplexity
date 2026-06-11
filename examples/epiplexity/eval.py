@@ -10,6 +10,7 @@ from dllm.core.samplers.epiplexity_oracle import OracleEpiplexitySampler, Oracle
 from dllm.core.samplers.epiplexity_risk import RiskEpiplexitySampler, RiskEpiplexitySamplerConfig
 from dllm.core.samplers.epiplexity_guided import GuidedEpiplexitySampler, GuidedEpiplexitySamplerConfig
 from dllm.core.samplers.epiplexity_spaced import SpacedEpiplexitySampler, SpacedEpiplexitySamplerConfig
+from dllm.core.samplers.epipath import EpiPathSampler, EpiPathSamplerConfig
 
 
 @dataclass
@@ -55,6 +56,9 @@ class LLaDAEpiplexityEvalHarness(MDLMEvalHarness):
             sampler_cls = SpacedEpiplexitySampler
             spaced_offset = int(sampler_type.rsplit("_", 1)[1])
             sampler_config = SpacedEpiplexitySamplerConfig(spaced_offset=spaced_offset)
+        elif sampler_type == "epipath":
+            sampler_cls = EpiPathSampler
+            sampler_config = EpiPathSamplerConfig()
         else:
             sampler_cls = MDLMSampler
             sampler_config = LLaDAEvalSamplerConfig()
