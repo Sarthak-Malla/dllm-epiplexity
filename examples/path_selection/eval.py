@@ -20,6 +20,7 @@ Use ``--model_args sampler_type=greedy`` for the native baseline.
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import time
 from typing import List
 
 import torch
@@ -103,6 +104,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
     def generate_until(self, requests: List) -> List[str]:
         """Generate until with candidate tracking for entropy_drop sampler."""
         out: List[str] = []
+        generation_batch_seconds = []
 
         for batch_start in tqdm(
             range(0, len(requests), self.batch_size), desc="Generating..."
@@ -120,10 +122,18 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
             ]
 
             # Call sampler with return_dict=True to capture metadata
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            generation_started_at = time.perf_counter()
             sampler_output = self.sampler.sample(
                 inputs=prompts,
                 config=self.sampler_config,
                 return_dict=True,
+            )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            generation_batch_seconds.append(
+                time.perf_counter() - generation_started_at
             )
 
             # Handle both BaseSamplerOutput and raw tensor (for greedy fallback)
@@ -157,6 +167,16 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
 
+        if generation_batch_seconds:
+            print(
+                "Generation timing: "
+                f"total_seconds={sum(generation_batch_seconds):.6f}, "
+                f"first_batch_seconds={generation_batch_seconds[0]:.6f}, "
+                "post_warmup_seconds="
+                f"{sum(generation_batch_seconds[1:]):.6f}, "
+                f"batch_count={len(generation_batch_seconds)}"
+            )
+
         return out
 
     def save_selected_candidates(self, output_path: str):
@@ -175,6 +195,11 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
 
 if __name__ == "__main__":
     import sys
+
+    process_started_at = time.perf_counter()
+    cuda_metrics_enabled = torch.cuda.is_available()
+    if cuda_metrics_enabled:
+        torch.cuda.reset_peak_memory_stats()
     
     # Extract output_path from arguments
     output_path = None
@@ -191,3 +216,13 @@ if __name__ == "__main__":
             _last_harness_instance.save_selected_candidates(output_path)
         except Exception as e:
             print(f"Error saving selected candidates: {e}")
+
+    if cuda_metrics_enabled:
+        torch.cuda.synchronize()
+        gibibyte = 1024**3
+        print(
+            "CUDA memory: "
+            f"peak_allocated_gib={torch.cuda.max_memory_allocated() / gibibyte:.6f}, "
+            f"peak_reserved_gib={torch.cuda.max_memory_reserved() / gibibyte:.6f}"
+        )
+    print(f"Process wall time: {time.perf_counter() - process_started_at:.6f} seconds")
