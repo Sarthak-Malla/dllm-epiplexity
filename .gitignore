@@ -10,7 +10,7 @@ IDEA_STOCKPILE.md
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.classs
+*$py.class
 
 # C extensions
 *.so
