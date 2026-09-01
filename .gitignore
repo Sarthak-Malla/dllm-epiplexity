@@ -2,6 +2,9 @@
 eval_results/
 examples/epiplexity/epipath_prompt_md/
 
+/research_ideas
+IDEA_STOCKPILE.md
+
 .tmp
 
 # Byte-compiled / optimized / DLL files
