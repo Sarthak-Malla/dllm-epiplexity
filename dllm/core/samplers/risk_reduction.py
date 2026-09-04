@@ -1,9 +1,9 @@
-"""
-Decoding-risk epiplexity sampler.
+"""Decoding-risk path-selection sampler.
 
-Run via eval entrypoints, for example:
-  source ~/.zshrc && conda activate ~/miniconda3/envs/dllm
-  bash /home/sarthak.malla/dllm-epiplexity/examples/epiplexity/eval_risk.slurm.sh
+Run its focused CPU integration tests with:
+    source /apps/local/conda_init.sh
+    conda activate /home/sarthak.malla/.conda/envs/dllm
+    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
 """
 
 import math
@@ -14,16 +14,32 @@ import torch
 import torch.nn.functional as F
 
 from dllm.core.samplers.base import BaseSamplerOutput
-from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
+from dllm.core.samplers.batched_lookahead import (
+    candidate_batch_from_mask_mapping,
+    evaluate_batched_lookahead,
+)
+from dllm.core.samplers.counterfactual import decoding_risk_per_token
+from dllm.core.samplers.dependency_guided import (
+    DependencyGuidedSamplerConfig,
+    build_step_diagnostics,
+    is_fixed_k_strategy,
+    resolve_dependency_guided_config,
+    run_base_forward_with_cfg_inputs,
+    select_fixed_k_candidate,
+    validate_fixed_k_schedule,
+)
+from dllm.core.samplers.mdlm import MDLMSampler
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
+from dllm.core.samplers.parallel_candidates import (
+    initialize_committed_anchor_state,
+    record_committed_anchors,
+)
 
 
 @dataclass
-class RiskReductionSamplerConfig(MDLMSamplerConfig):
+class RiskReductionSamplerConfig(DependencyGuidedSamplerConfig):
     # The heuristic for generating candidate masks.
     risk_candidate_strategy: str = "mixed"
-
-
 class RiskReductionSampler(MDLMSampler):
     """
     Epiplexity sampler using held-out decoding-risk reduction as the verifier.
@@ -35,8 +51,7 @@ class RiskReductionSampler(MDLMSampler):
 
     def get_decoding_risk_per_token(self, logits: torch.Tensor) -> torch.Tensor:
         """Calculate decoding risk, 1 - max probability, for each position [B, T]."""
-        max_probs = F.softmax(logits, dim=-1).amax(dim=-1)
-        return 1.0 - max_probs
+        return decoding_risk_per_token(logits)
 
     def generate_candidate_sets(
         self,
@@ -142,39 +157,30 @@ class RiskReductionSampler(MDLMSampler):
         candidates: Dict[str, torch.Tensor],
         attention_mask: torch.Tensor,
         base_risk_map: torch.Tensor,
+        candidate_chunk_size: Optional[int] = None,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor], List[str]]:
         """Evaluate lookahead candidates and select the best mask per batch row."""
-        B = x.shape[0]
-        best_risk_reduction = torch.full((B,), -torch.inf, device=x.device)
-        best_c_idx = torch.zeros_like(mask_index, dtype=torch.bool)
-        best_candidate_names = [""] * B
-        risk_reductions = {}
-
-        for c_name, c_idx in candidates.items():
-            c_lookahead = x.clone()
-            c_lookahead[c_idx] = x0[c_idx]
-            heldout_mask = mask_index & (~c_idx)
-
-            la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
-            la_risk = (
-                self.get_decoding_risk_per_token(la_logits) * heldout_mask
-            ).sum(dim=-1)
-            base_risk = (base_risk_map * heldout_mask).sum(dim=-1)
-
-            risk_reduction = base_risk - la_risk
-            risk_reductions[c_name] = risk_reduction
-
-            improved = risk_reduction > best_risk_reduction
-            best_risk_reduction = torch.where(
-                improved, risk_reduction, best_risk_reduction
-            )
-            best_c_idx = torch.where(improved.unsqueeze(-1), c_idx, best_c_idx)
-
-            for batch_idx in range(B):
-                if improved[batch_idx]:
-                    best_candidate_names[batch_idx] = c_name
-
-        return best_c_idx, risk_reductions, best_candidate_names
+        candidate_batch = candidate_batch_from_mask_mapping(
+            candidates,
+            eligible_mask=mask_index,
+        )
+        result = evaluate_batched_lookahead(
+            self.model,
+            x,
+            x0,
+            candidate_batch,
+            base_metric_map=base_risk_map,
+            metric="risk_reduction",
+            attention_mask=attention_mask,
+            masked_active_mask=mask_index,
+            candidate_chunk_size=candidate_chunk_size,
+        )
+        risk_reductions = {
+            name: result.scores[index]
+            for index, name in enumerate(candidate_batch.names)
+        }
+        best_candidate_names = [name or "" for name in result.best_names]
+        return result.best_mask, risk_reductions, best_candidate_names
 
     @torch.no_grad()
     def sample(
@@ -185,6 +191,7 @@ class RiskReductionSampler(MDLMSampler):
     ) -> Union[BaseSamplerOutput, torch.Tensor]:
         if config is None:
             config = RiskReductionSamplerConfig()
+        config = resolve_dependency_guided_config(config, kwargs)
 
         steps = kwargs.get("steps", config.steps)
         max_new_tokens = kwargs.get("max_new_tokens", config.max_new_tokens)
@@ -205,6 +212,13 @@ class RiskReductionSampler(MDLMSampler):
         risk_candidate_strategy = kwargs.get(
             "risk_candidate_strategy", config.risk_candidate_strategy
         )
+        candidate_chunk_size = kwargs.get(
+            "candidate_chunk_size",
+            config.candidate_chunk_size,
+        )
+        proposal_strategy = config.proposal_strategy
+        cardinality_strategy = config.dependency_cardinality_strategy
+        diagnostic_metadata = config.diagnostic_metadata
 
         assert 1 <= block_size
         assert 1 <= steps
@@ -239,9 +253,11 @@ class RiskReductionSampler(MDLMSampler):
             x[i, prompt_lens[i] : prompt_lens[i] + max_new_tokens] = mask_id
 
         attention_mask = torch.zeros((B, T), dtype=torch.long, device=self.model.device)
+        response_mask = torch.zeros((B, T), dtype=torch.bool, device=self.model.device)
         for i, pl in enumerate(prompt_lens):
             valid_end = min(pl + max_new_tokens, T)
             attention_mask[i, :valid_end] = 1
+            response_mask[i, pl:valid_end] = True
 
         unmasked_index = (x != mask_id) & attention_mask.bool()
         if cfg_keep_tokens and len(cfg_keep_tokens) > 0:
@@ -254,8 +270,20 @@ class RiskReductionSampler(MDLMSampler):
         steps = math.ceil(steps / num_blocks)
         histories = [x.clone()] if return_dict else None
         selected_candidates = [[] for _ in range(B)]
+        diagnostics = [[] for _ in range(B)] if diagnostic_metadata else None
+        global_step_index = 0
 
         for b in range(num_blocks):
+            anchor_state = (
+                initialize_committed_anchor_state(
+                    x,
+                    confidence_threshold=(
+                        config.dependency_anchor_confidence_threshold
+                    ),
+                )
+                if proposal_strategy == "dependency"
+                else None
+            )
             block_mask_index = torch.zeros(
                 (B, block_size), dtype=torch.bool, device=x.device
             )
@@ -268,34 +296,71 @@ class RiskReductionSampler(MDLMSampler):
                     block_mask_index[j, : end - start] = x[j, start:end] == mask_id
                     block_span_mask[j, start:end] = True
 
-            num_transfer_tokens = get_num_transfer_tokens(
-                mask_index=block_mask_index,
-                steps=steps,
-                scheduler=self.scheduler,
-                stochastic=stochastic_transfer,
-            )
-
-            effective_steps = num_transfer_tokens.size(1)
+            if cardinality_strategy in {
+                "marginal_utility",
+                "joint_k",
+                "entropy_budget",
+            }:
+                num_transfer_tokens = None
+                effective_steps = int(block_mask_index.sum(dim=-1).max().item())
+            else:
+                num_transfer_tokens = get_num_transfer_tokens(
+                    mask_index=block_mask_index,
+                    steps=steps,
+                    scheduler=self.scheduler,
+                    stochastic=stochastic_transfer,
+                )
+                effective_steps = num_transfer_tokens.size(1)
+            if (
+                is_fixed_k_strategy(proposal_strategy)
+                and cardinality_strategy == "fixed"
+            ):
+                validate_fixed_k_schedule(
+                    num_transfer_tokens,
+                    (
+                        config.dependency_commit_k
+                        if proposal_strategy == "dependency"
+                        else 1
+                    ),
+                )
 
             for i in range(effective_steps):
-                num_transfer = num_transfer_tokens[:, i]
+                if num_transfer_tokens is None:
+                    remaining_by_row = (
+                        (x == mask_id) & block_span_mask
+                    ).sum(dim=-1, dtype=torch.long)
+                    num_transfer = torch.minimum(
+                        remaining_by_row,
+                        torch.full_like(
+                            remaining_by_row,
+                            config.dependency_max_action_size,
+                        ),
+                    )
+                else:
+                    num_transfer = num_transfer_tokens[:, i]
                 if torch.all(num_transfer == 0):
+                    if num_transfer_tokens is None:
+                        break
                     continue
 
                 mask_index = x == mask_id
                 current_block_mask = mask_index & block_span_mask
 
+                unconditional_ids = None
                 if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    un_x[unmasked_index] = mask_id
-                    x_ = torch.cat([x, un_x], dim=0)
-                    logits = self.model(
-                        x_, attention_mask=attention_mask.repeat(2, 1)
-                    ).logits
-                    logits, un_logits = torch.chunk(logits, 2, dim=0)
-                    logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
-                else:
-                    logits = self.model(x, attention_mask=attention_mask).logits
+                    unconditional_ids = x.clone()
+                    unconditional_ids[unmasked_index] = mask_id
+                base_forward = run_base_forward_with_cfg_inputs(
+                    self.model,
+                    x,
+                    attention_mask,
+                    cfg_scale=cfg_scale,
+                    unconditional_input_ids=unconditional_ids,
+                    capture_dependency=proposal_strategy == "dependency",
+                    dependency_last_n_layers=config.dependency_last_n_layers,
+                    measure_timing=diagnostic_metadata,
+                )
+                logits = base_forward.logits
 
                 if suppress_tokens and len(suppress_tokens) > 0:
                     for token_id in suppress_tokens:
@@ -317,22 +382,84 @@ class RiskReductionSampler(MDLMSampler):
                 )
                 confidence = torch.where(current_block_mask, x0_p, -float("inf"))
 
-                candidates = self.generate_candidate_sets(
-                    confidence,
-                    current_block_mask,
-                    num_transfer,
-                    strategy=risk_candidate_strategy,
-                )
-
                 base_risk_map = self.get_decoding_risk_per_token(logits)
-                best_c_idx, _, best_candidate_names = self._select_best_candidate(
-                    x=x,
-                    x0=x0,
-                    mask_index=mask_index,
-                    candidates=candidates,
-                    attention_mask=attention_mask,
-                    base_risk_map=base_risk_map,
-                )
+                if proposal_strategy == "legacy":
+                    candidates = self.generate_candidate_sets(
+                        confidence,
+                        current_block_mask,
+                        num_transfer,
+                        strategy=risk_candidate_strategy,
+                    )
+                    best_c_idx, _, best_candidate_names = self._select_best_candidate(
+                        x=x,
+                        x0=x0,
+                        mask_index=mask_index,
+                        candidates=candidates,
+                        attention_mask=attention_mask,
+                        base_risk_map=base_risk_map,
+                        candidate_chunk_size=candidate_chunk_size,
+                    )
+                else:
+                    active_rows = num_transfer > 0
+                    proposal_mask = current_block_mask & active_rows[:, None]
+                    step_seed = config.dependency_generation_seed + global_step_index
+                    entropy_map = -torch.sum(
+                        p.float() * torch.log(p.float().clamp_min(1e-12)),
+                        dim=-1,
+                    )
+                    selection = select_fixed_k_candidate(
+                        self.model,
+                        x,
+                        x0,
+                        base_forward=base_forward,
+                        base_metric_map=base_risk_map,
+                        entropy_map=entropy_map,
+                        confidence=x0_p,
+                        metric="risk_reduction",
+                        active_mask=proposal_mask,
+                        requested_k=num_transfer,
+                        anchor_state=anchor_state,
+                        masked_active_mask=mask_index,
+                        response_mask=response_mask,
+                        attention_mask=attention_mask,
+                        config=config,
+                        generation_seed=step_seed,
+                    )
+                    best_c_idx = selection.lookahead.best_mask
+                    best_candidate_names = [
+                        name or "" for name in selection.lookahead.best_names
+                    ]
+                    anchor_state_before = anchor_state
+                    if anchor_state is not None:
+                        anchor_state_after = record_committed_anchors(
+                            anchor_state,
+                            best_c_idx,
+                            x0_p,
+                            x0,
+                            commit_step=global_step_index,
+                        )
+                    else:
+                        anchor_state_after = None
+                    if diagnostics is not None:
+                        step_diagnostics = build_step_diagnostics(
+                            selection,
+                            base_forward,
+                            config=config,
+                            metric="risk_reduction",
+                            masked_active_mask=mask_index,
+                            response_mask=response_mask,
+                            block_index=b,
+                            step_index=i,
+                            global_step_index=global_step_index,
+                            generation_seed=step_seed,
+                            base_metric_map=base_risk_map,
+                            predicted_token_ids=x0,
+                            anchor_state_before=anchor_state_before,
+                            anchor_state_after=anchor_state_after,
+                        )
+                        for batch_index, record in enumerate(step_diagnostics):
+                            diagnostics[batch_index].append(record)
+                    anchor_state = anchor_state_after
 
                 for b_idx in range(B):
                     if best_candidate_names[b_idx]:
@@ -343,11 +470,13 @@ class RiskReductionSampler(MDLMSampler):
 
                 if return_dict:
                     histories.append(x.clone())
+                global_step_index += 1
 
         if return_dict:
             return BaseSamplerOutput(
                 sequences=x,
                 histories=histories,
                 selected_candidates=selected_candidates,
+                diagnostics=diagnostics,
             )
         return x

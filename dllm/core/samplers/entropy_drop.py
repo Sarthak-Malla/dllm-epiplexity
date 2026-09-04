@@ -1,9 +1,9 @@
-"""
-This is the MDLMSampler with Entropy drop to decide on the path selection.
+"""Entropy-drop path-selection sampler.
 
-Run via eval entrypoint, for example:
-    source ~/.bashrc && conda activate dllm
-    bash /home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/eval_sampler.sh --sampler_type oracle 
+Run its focused CPU integration tests with:
+    source /apps/local/conda_init.sh
+    conda activate /home/sarthak.malla/.conda/envs/dllm
+    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
 """
 
 import math
@@ -14,19 +14,35 @@ from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 
 from dllm.core.samplers.base import BaseSamplerOutput
-from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
+from dllm.core.samplers.batched_lookahead import (
+    candidate_batch_from_mask_mapping,
+    evaluate_batched_lookahead,
+)
+from dllm.core.samplers.counterfactual import entropy_per_token
+from dllm.core.samplers.dependency_guided import (
+    DependencyGuidedSamplerConfig,
+    build_step_diagnostics,
+    is_fixed_k_strategy,
+    resolve_dependency_guided_config,
+    run_base_forward_with_cfg_inputs,
+    select_fixed_k_candidate,
+    validate_fixed_k_schedule,
+)
+from dllm.core.samplers.mdlm import MDLMSampler
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
+from dllm.core.samplers.parallel_candidates import (
+    initialize_committed_anchor_state,
+    record_committed_anchors,
+)
 
 @dataclass
-class EntropyDropSamplerConfig(MDLMSamplerConfig):
+class EntropyDropSamplerConfig(DependencyGuidedSamplerConfig):
     """
     Configuration for the EntropyDropSampler.
     """
     # The heuristic for generating candidate masks
     # "mixed" generates top-entropy and spaced anchors
     oracle_candidate_strategy: str = "mixed"
-
-
 class EntropyDropSampler(MDLMSampler):
     """
     Epiplexity Oracle Sampler with Entropy Drop for path selection.
@@ -48,10 +64,7 @@ class EntropyDropSampler(MDLMSampler):
         Returns:
             torch.Tensor: The entropy per token of shape (batch_size, seq_len) => [B, T].
         """
-        probs = F.softmax(logits, dim=-1)
-        log_probs = F.log_softmax(logits, dim=-1)
-        entropy = -torch.sum(probs * log_probs, dim=-1)  # Shape: (batch_size, seq_len)
-        return entropy
+        return entropy_per_token(logits)
     
 
     def generate_candidate_sets(
@@ -165,6 +178,7 @@ class EntropyDropSampler(MDLMSampler):
         candidates: Dict[str, torch.Tensor],
         attention_mask: torch.Tensor,
         base_entropy_map: torch.Tensor,
+        candidate_chunk_size: Optional[int] = None,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor], List[str]]:
         """
         Select the best candidate set based on entropy drop.
@@ -177,35 +191,27 @@ class EntropyDropSampler(MDLMSampler):
             - best_candidate_names: list of best candidate name per batch element
         """
         """Evaluate lookahead candidates and select the best mask per batch row."""
-        B = x.shape[0]
-        best_structure_gain = torch.full((B,), -torch.inf, device=x.device)
-        best_c_idx = torch.zeros_like(mask_index, dtype=torch.bool)
-        best_candidate_names = [""] * B  # Track which candidate was best for each batch element
-        structure_gains = {}
-
-        for c_name, c_idx in candidates.items():
-            c_lookahead = x.clone()
-            c_lookahead[c_idx] = x0[c_idx]
-            c_new_mask = mask_index & (~c_idx)
-
-            # 1-step lookahead forward pass
-            la_logits = self.model(c_lookahead, attention_mask=attention_mask).logits
-
-            la_ent_c = (self.get_entropy_per_token(la_logits) * c_new_mask).sum(dim=-1)
-            base_ent_c = (base_entropy_map * c_new_mask).sum(dim=-1)
-
-            entropy_drop = base_ent_c - la_ent_c
-            structure_gains[c_name] = entropy_drop
-
-            improved = entropy_drop > best_structure_gain
-            best_structure_gain = torch.where(improved, entropy_drop, best_structure_gain)
-            best_c_idx = torch.where(improved.unsqueeze(-1), c_idx, best_c_idx)
-            # Update best candidate names
-            for batch_idx in range(B):
-                if improved[batch_idx]:
-                    best_candidate_names[batch_idx] = c_name
-
-        return best_c_idx, structure_gains, best_candidate_names
+        candidate_batch = candidate_batch_from_mask_mapping(
+            candidates,
+            eligible_mask=mask_index,
+        )
+        result = evaluate_batched_lookahead(
+            self.model,
+            x,
+            x0,
+            candidate_batch,
+            base_metric_map=base_entropy_map,
+            metric="entropy_drop",
+            attention_mask=attention_mask,
+            masked_active_mask=mask_index,
+            candidate_chunk_size=candidate_chunk_size,
+        )
+        structure_gains = {
+            name: result.scores[index]
+            for index, name in enumerate(candidate_batch.names)
+        }
+        best_candidate_names = [name or "" for name in result.best_names]
+        return result.best_mask, structure_gains, best_candidate_names
 
     
     @torch.no_grad()
@@ -217,6 +223,7 @@ class EntropyDropSampler(MDLMSampler):
     ) -> Union[BaseSamplerOutput, torch.Tensor]:
         if config is None:
             config = EntropyDropSamplerConfig()
+        config = resolve_dependency_guided_config(config, kwargs)
         
         steps = kwargs.get("steps", config.steps)
         max_new_tokens = kwargs.get("max_new_tokens", config.max_new_tokens)
@@ -232,6 +239,13 @@ class EntropyDropSampler(MDLMSampler):
         begin_suppress_tokens = kwargs.get("begin_suppress_tokens", config.begin_suppress_tokens)
         
         oracle_candidate_strategy = kwargs.get("oracle_candidate_strategy", config.oracle_candidate_strategy)
+        candidate_chunk_size = kwargs.get(
+            "candidate_chunk_size",
+            config.candidate_chunk_size,
+        )
+        proposal_strategy = config.proposal_strategy
+        cardinality_strategy = config.dependency_cardinality_strategy
+        diagnostic_metadata = config.diagnostic_metadata
 
         assert 1 <= block_size
         assert 1 <= steps
@@ -260,9 +274,11 @@ class EntropyDropSampler(MDLMSampler):
             x[i, prompt_lens[i]:prompt_lens[i] + max_new_tokens] = mask_id
         
         attention_mask = torch.zeros((B, T), dtype=torch.long, device=self.model.device)
+        response_mask = torch.zeros((B, T), dtype=torch.bool, device=self.model.device)
         for i, pl in enumerate(prompt_lens):
             valid_end = min(pl + max_new_tokens, T)
             attention_mask[i, :valid_end] = 1
+            response_mask[i, pl:valid_end] = True
 
         unmasked_index = (x != mask_id) & attention_mask.bool()
         if cfg_keep_tokens and len(cfg_keep_tokens) > 0:
@@ -274,8 +290,20 @@ class EntropyDropSampler(MDLMSampler):
         steps = math.ceil(steps / num_blocks)
         histories = [x.clone()] if return_dict else None
         selected_candidates = [[] for _ in range(B)]  # Track candidates per example
+        diagnostics = [[] for _ in range(B)] if diagnostic_metadata else None
+        global_step_index = 0
 
         for b in range(num_blocks):
+            anchor_state = (
+                initialize_committed_anchor_state(
+                    x,
+                    confidence_threshold=(
+                        config.dependency_anchor_confidence_threshold
+                    ),
+                )
+                if proposal_strategy == "dependency"
+                else None
+            )
             # Build a per-sample mask *within this block* (aligned to each prompt's tail)
             block_mask_index = torch.zeros(
                 (B, block_size), dtype=torch.bool, device=x.device
@@ -292,37 +320,75 @@ class EntropyDropSampler(MDLMSampler):
                     ) # which positions in this block are still masked
                     block_span_mask[j, start:end] = True
 
-            # Decide how many tokens to reveal per step in this block
-            num_transfer_tokens = get_num_transfer_tokens(
-                mask_index=block_mask_index,
-                steps=steps,
-                scheduler=self.scheduler,
-                stochastic=stochastic_transfer,
-            )
-
-            # Some steps may be skipped if there are no transfers
-            effective_steps = num_transfer_tokens.size(1)
+            if cardinality_strategy in {
+                "marginal_utility",
+                "joint_k",
+                "entropy_budget",
+            }:
+                # Adaptive policies guarantee progress themselves. The initial
+                # mask count is a safe upper bound because every action reveals
+                # at least one position.
+                num_transfer_tokens = None
+                effective_steps = int(block_mask_index.sum(dim=-1).max().item())
+            else:
+                num_transfer_tokens = get_num_transfer_tokens(
+                    mask_index=block_mask_index,
+                    steps=steps,
+                    scheduler=self.scheduler,
+                    stochastic=stochastic_transfer,
+                )
+                effective_steps = num_transfer_tokens.size(1)
+            if (
+                is_fixed_k_strategy(proposal_strategy)
+                and cardinality_strategy == "fixed"
+            ):
+                validate_fixed_k_schedule(
+                    num_transfer_tokens,
+                    (
+                        config.dependency_commit_k
+                        if proposal_strategy == "dependency"
+                        else 1
+                    ),
+                )
 
             # ----- Iterative reveal inside the current block -----
             for i in range(effective_steps):
-                # Get the current number of tokens to transfer for each sample
-                num_transfer = num_transfer_tokens[:, i]
+                if num_transfer_tokens is None:
+                    remaining_by_row = (
+                        (x == mask_id) & block_span_mask
+                    ).sum(dim=-1, dtype=torch.long)
+                    num_transfer = torch.minimum(
+                        remaining_by_row,
+                        torch.full_like(
+                            remaining_by_row,
+                            config.dependency_max_action_size,
+                        ),
+                    )
+                else:
+                    num_transfer = num_transfer_tokens[:, i]
                 if torch.all(num_transfer == 0):
+                    if num_transfer_tokens is None:
+                        break
                     continue
 
                 mask_index = x == mask_id # current global mask map
                 current_block_mask = mask_index & block_span_mask # current mask map restricted to this block
 
-                # Model forward pass to get the logits for the current state of x
+                unconditional_ids = None
                 if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    un_x[unmasked_index] = mask_id
-                    x_ = torch.cat([x, un_x], dim=0)
-                    logits = self.model(x_, attention_mask=attention_mask.repeat(2, 1)).logits
-                    logits, un_logits = torch.chunk(logits, 2, dim=0)
-                    logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
-                else:
-                    logits = self.model(x, attention_mask=attention_mask).logits
+                    unconditional_ids = x.clone()
+                    unconditional_ids[unmasked_index] = mask_id
+                base_forward = run_base_forward_with_cfg_inputs(
+                    self.model,
+                    x,
+                    attention_mask,
+                    cfg_scale=cfg_scale,
+                    unconditional_input_ids=unconditional_ids,
+                    capture_dependency=proposal_strategy == "dependency",
+                    dependency_last_n_layers=config.dependency_last_n_layers,
+                    measure_timing=diagnostic_metadata,
+                )
+                logits = base_forward.logits
 
                 if suppress_tokens is not None and len(suppress_tokens) > 0:
                     for token_id in suppress_tokens:
@@ -345,24 +411,80 @@ class EntropyDropSampler(MDLMSampler):
                 x0_p = torch.squeeze(torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)
                 confidence = torch.where(current_block_mask, x0_p, -np.inf)
 
-                # ----- Generate candidate sets based on the current confidence and mask -----
-                candidates = self.generate_candidate_sets(
-                    confidence=confidence,
-                    mask_idx=current_block_mask,
-                    num_transfer=num_transfer,
-                    strategy=oracle_candidate_strategy,
-                )
-
-                # ----- Evaluate candidates and select the best one based on entropy drop -----
                 base_entropy_map = self.get_entropy_per_token(logits)
-                best_c_idx, _, best_candidate_names = self._select_best_candidate(
-                    x=x,
-                    x0=x0,
-                    mask_index=mask_index,
-                    candidates=candidates,
-                    attention_mask=attention_mask,
-                    base_entropy_map=base_entropy_map,
-                )
+                if proposal_strategy == "legacy":
+                    candidates = self.generate_candidate_sets(
+                        confidence=confidence,
+                        mask_idx=current_block_mask,
+                        num_transfer=num_transfer,
+                        strategy=oracle_candidate_strategy,
+                    )
+                    best_c_idx, _, best_candidate_names = self._select_best_candidate(
+                        x=x,
+                        x0=x0,
+                        mask_index=mask_index,
+                        candidates=candidates,
+                        attention_mask=attention_mask,
+                        base_entropy_map=base_entropy_map,
+                        candidate_chunk_size=candidate_chunk_size,
+                    )
+                else:
+                    active_rows = num_transfer > 0
+                    proposal_mask = current_block_mask & active_rows[:, None]
+                    step_seed = config.dependency_generation_seed + global_step_index
+                    selection = select_fixed_k_candidate(
+                        self.model,
+                        x,
+                        x0,
+                        base_forward=base_forward,
+                        base_metric_map=base_entropy_map,
+                        entropy_map=base_entropy_map,
+                        confidence=x0_p,
+                        metric="entropy_drop",
+                        active_mask=proposal_mask,
+                        requested_k=num_transfer,
+                        anchor_state=anchor_state,
+                        masked_active_mask=mask_index,
+                        response_mask=response_mask,
+                        attention_mask=attention_mask,
+                        config=config,
+                        generation_seed=step_seed,
+                    )
+                    best_c_idx = selection.lookahead.best_mask
+                    best_candidate_names = [
+                        name or "" for name in selection.lookahead.best_names
+                    ]
+                    anchor_state_before = anchor_state
+                    if anchor_state is not None:
+                        anchor_state_after = record_committed_anchors(
+                            anchor_state,
+                            best_c_idx,
+                            x0_p,
+                            x0,
+                            commit_step=global_step_index,
+                        )
+                    else:
+                        anchor_state_after = None
+                    if diagnostics is not None:
+                        step_diagnostics = build_step_diagnostics(
+                            selection,
+                            base_forward,
+                            config=config,
+                            metric="entropy_drop",
+                            masked_active_mask=mask_index,
+                            response_mask=response_mask,
+                            block_index=b,
+                            step_index=i,
+                            global_step_index=global_step_index,
+                            generation_seed=step_seed,
+                            base_metric_map=base_entropy_map,
+                            predicted_token_ids=x0,
+                            anchor_state_before=anchor_state_before,
+                            anchor_state_after=anchor_state_after,
+                        )
+                        for batch_index, record in enumerate(step_diagnostics):
+                            diagnostics[batch_index].append(record)
+                    anchor_state = anchor_state_after
                 
                 # Track selected candidates per example
                 for b in range(B):
@@ -375,11 +497,13 @@ class EntropyDropSampler(MDLMSampler):
 
                 if return_dict:
                     histories.append(x.clone())
+                global_step_index += 1
         
         if return_dict:
             return BaseSamplerOutput(
                 sequences=x,
                 histories=histories,
                 selected_candidates=selected_candidates,
+                diagnostics=diagnostics,
             )
         return x

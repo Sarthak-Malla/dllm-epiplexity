@@ -12,6 +12,7 @@ class BaseSamplerOutput:
     sequences: torch.Tensor
     histories: list[torch.Tensor] | None = None
     selected_candidates: list[list[str]] | None = None  # Per-example, list of candidate names selected at each step
+    diagnostics: list[list[dict[str, object]]] | None = None
 
 
 @dataclass

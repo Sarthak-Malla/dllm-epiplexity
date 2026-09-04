@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "freeze_name": "p8_reduced_full_v3",
+  "frozen_at": "2026-09-03",
+  "purpose": "Run only the two new dependency methods and reuse the four completed full baselines.",
+  "model": {
+    "name": "GSAI-ML/LLaDA-8B-Instruct",
+    "revision": "08b83a6feb34df1a6011b80c3c00c7563e963b07",
+    "dtype": "bfloat16",
+    "load_in_4bit": false,
+    "max_length": 4096
+  },
+  "shared_generation": {
+    "batch_size": 1,
+    "temperature": 0.0,
+    "cfg_scale": 0.0,
+    "stochastic_transfer": false,
+    "candidate_budget": 4,
+    "candidate_chunk_size": 1,
+    "verifier": "entropy_drop",
+    "dependency_generation_seed": 42,
+    "harness_seeds": [0, 1234, 1234, 1234],
+    "apply_chat_template": true,
+    "diagnostic_retention": "compact"
+  },
+  "tasks": {
+    "gsm8k_cot": {
+      "dataset": "gsm8k/main",
+      "split": "test",
+      "total_examples": 1319,
+      "num_fewshot": 5,
+      "max_new_tokens": 256,
+      "steps": 64,
+      "block_size": 64,
+      "unsafe_code": false
+    },
+    "humaneval_instruct": {
+      "dataset": "openai/openai_humaneval/openai_humaneval",
+      "split": "test",
+      "total_examples": 164,
+      "num_fewshot": 0,
+      "max_new_tokens": 1024,
+      "steps": 256,
+      "block_size": 256,
+      "unsafe_code": true
+    }
+  },
+  "methods": [
+    {
+      "name": "dependency_fixed_k4_n4",
+      "proposal_strategy": "dependency",
+      "candidate_budget": 4,
+      "cardinality_strategy": "fixed",
+      "commit_k": 4,
+      "size_scoring": "raw"
+    },
+    {
+      "name": "dependency_entropy_budget_n4",
+      "proposal_strategy": "dependency",
+      "candidate_budget": 4,
+      "cardinality_strategy": "entropy_budget",
+      "entropy_budget": 2.0,
+      "allowed_action_sizes": [1, 2, 4],
+      "maximum_action_size": 4,
+      "size_scoring": "per_token"
+    }
+  ],
+  "dependency": {
+    "parallel_variant": "soft_full",
+    "last_n_layers": 4,
+    "direction": "outgoing",
+    "target_weighting": "entropy",
+    "position_temperature": 1.0,
+    "confidence_exponent": 0.0,
+    "sink_filter_enabled": true,
+    "sink_quantile": 0.99,
+    "zero_diagonal": true,
+    "renormalize_selected_keys": true,
+    "fallback_strategy": "dependency_only",
+    "conflict_normalization": "max",
+    "conflict_penalty": 1.0,
+    "hard_conflict_threshold": 0.25,
+    "anchor_support_weight": 1.0,
+    "anchor_confidence_threshold": 0.8
+  },
+  "execution": {
+    "job_count": 4,
+    "gpus_per_job": 2,
+    "job_granularity": "one task and one method per Slurm job",
+    "data_parallelism": "two Accelerate ranks per task",
+    "time_limit": "24:00:00",
+    "cpus_per_task": 64,
+    "memory": "128G",
+    "wandb_mode": "online",
+    "wandb_runs_per_job": 1,
+    "distributed_auxiliary_artifacts": "one shard per rank plus rank-zero manifests"
+  },
+  "reused_baselines": [
+    "/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/gsm8k_full_greedy/GSAI-ML__LLaDA-8B-Instruct/results_2026-08-28T22-34-58.832476.json",
+    "/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/gsm8k_full_entropy_drop/GSAI-ML__LLaDA-8B-Instruct/results_2026-08-29T21-05-48.985244.json",
+    "/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/humaneval_full_greedy/GSAI-ML__LLaDA-8B-Instruct/results_2026-08-31T13-20-44.699043.json",
+    "/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/humaneval_full_entropy_drop/GSAI-ML__LLaDA-8B-Instruct/results_2026-08-31T19-49-03.066184.json"
+  ]
+}

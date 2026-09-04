@@ -2,6 +2,8 @@
 eval_results/
 examples/epiplexity/epipath_prompt_md/
 
+.wandb/
+
 /research_ideas
 IDEA_STOCKPILE.md
 
