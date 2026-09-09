@@ -108,6 +108,14 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
                 oracle_candidate_strategy=oracle_candidate_strategy,
                 return_dict=True,  # Enable return_dict for candidate tracking
             )
+        elif sampler_type == "dependency_non_lookahead":
+            from dllm.core.samplers.dependency_non_lookahead import (
+                DependencyNonLookaheadSampler,
+                DependencyNonLookaheadSamplerConfig,
+            )
+
+            sampler_cls = DependencyNonLookaheadSampler
+            sampler_config = DependencyNonLookaheadSamplerConfig(return_dict=True)
         elif sampler_type in {"risk_reduction", "dependency_risk"}:
             from dllm.core.samplers.risk_reduction import RiskReductionSampler, RiskReductionSamplerConfig
 
@@ -121,7 +129,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
         else:
             available = (
                 "greedy, entropy_drop, risk_reduction, dependency_entropy, "
-                "dependency_risk"
+                "dependency_risk, dependency_non_lookahead"
             )
             raise ValueError(
                 f"Unknown sampler_type: {sampler_type}. Available: {available}."

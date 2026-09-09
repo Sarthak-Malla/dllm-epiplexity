@@ -35,7 +35,7 @@ case "${method}" in
         commit_k=1
         cardinality_strategy=entropy_budget
         size_scoring=per_token
-        action_size_label='1|2|4'
+        action_size_label='1-4'
         ;;
     *)
         echo "P8_METHOD must be dependency_fixed_k4_n4 or dependency_entropy_budget_n4" >&2
@@ -126,7 +126,7 @@ if [ "${P8_SKIP_COMPLETED:-1}" = 1 ] && [ -s "${completion_marker}" ]; then
     exit 0
 fi
 
-model_args="pretrained=${checkpoint},dtype=bfloat16,load_in_4bit=false,max_length=4096,max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},temperature=0.0,cfg_scale=0.0,stochastic_transfer=false,return_dict=true,diagnostic_retention=compact,sampler_type=entropy_drop,proposal_strategy=dependency,candidate_budget=${candidate_budget},candidate_chunk_size=${candidate_chunk_size},dependency_commit_k=${commit_k},dependency_parallel_variant=soft_full,dependency_cardinality_strategy=${cardinality_strategy},dependency_max_action_size=4,dependency_action_sizes=1|2|4,dependency_utility_threshold=0.0,dependency_entropy_budget=2.0,dependency_size_scoring=${size_scoring},dependency_immediate_cost_weight=1.0,dependency_size_penalty=0.0,dependency_last_n_layers=4,dependency_direction=outgoing,dependency_target_weighting=entropy,dependency_position_temperature=1.0,dependency_confidence_exponent=0.0,dependency_generation_seed=${seed},dependency_sink_filter_enabled=true,dependency_sink_quantile=0.99,dependency_zero_diagonal=true,dependency_renormalize_selected_keys=true,dependency_fallback_strategy=dependency_only,dependency_conflict_normalization=max,dependency_conflict_penalty=1.0,dependency_hard_conflict_threshold=0.25,dependency_anchor_support_weight=1.0,dependency_anchor_confidence_threshold=0.8,diagnostic_metadata=true"
+model_args="pretrained=${checkpoint},dtype=bfloat16,load_in_4bit=false,max_length=4096,max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},temperature=0.0,cfg_scale=0.0,stochastic_transfer=false,return_dict=true,diagnostic_retention=compact,sampler_type=entropy_drop,proposal_strategy=dependency,candidate_budget=${candidate_budget},candidate_chunk_size=${candidate_chunk_size},dependency_commit_k=${commit_k},dependency_parallel_variant=soft_full,dependency_cardinality_strategy=${cardinality_strategy},dependency_max_action_size=4,dependency_utility_threshold=0.0,dependency_entropy_budget=2.0,dependency_size_scoring=${size_scoring},dependency_immediate_cost_weight=1.0,dependency_size_penalty=0.0,dependency_last_n_layers=4,dependency_direction=outgoing,dependency_target_weighting=entropy,dependency_position_temperature=1.0,dependency_confidence_exponent=0.0,dependency_generation_seed=${seed},dependency_sink_filter_enabled=true,dependency_sink_quantile=0.99,dependency_zero_diagonal=true,dependency_renormalize_selected_keys=true,dependency_fallback_strategy=dependency_only,dependency_conflict_normalization=max,dependency_conflict_penalty=1.0,dependency_hard_conflict_threshold=0.25,dependency_anchor_support_weight=1.0,dependency_anchor_confidence_threshold=0.8,diagnostic_metadata=true"
 
 wandb_arguments=()
 wandb_group=p8-${run_tag}-full-${method}

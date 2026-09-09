@@ -551,7 +551,7 @@ def remap_compact_candidates_to_sequence(
     )
 
 
-def _build_dependency_candidates(
+def build_dependency_candidates(
     base_forward: DependencyBaseForwardOutput,
     *,
     active_mask: torch.Tensor,
@@ -771,7 +771,9 @@ def _build_baseline_candidates(
     raise ValueError(f"Unsupported baseline strategy: {strategy!r}.")
 
 
-def _release_capture_tensors(base_forward: DependencyBaseForwardOutput) -> bool:
+def release_dependency_capture_tensors(
+    base_forward: DependencyBaseForwardOutput,
+) -> bool:
     """Release retained Q/K references before materializing lookahead logits."""
     captures = base_forward.captures
     if captures is None:
@@ -817,7 +819,7 @@ def select_fixed_k_candidate(
             dependency,
             reconstruction_seconds,
             proposal_seconds,
-        ) = _build_dependency_candidates(
+        ) = build_dependency_candidates(
             base_forward,
             active_mask=active_mask,
             requested_k=requested_k,
@@ -829,7 +831,7 @@ def select_fixed_k_candidate(
             config=config,
             generation_seed=generation_seed,
         )
-        captures_released = _release_capture_tensors(base_forward)
+        captures_released = release_dependency_capture_tensors(base_forward)
     else:
         reconstruction_seconds = 0.0
         candidates = _build_baseline_candidates(

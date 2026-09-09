@@ -14,6 +14,10 @@ import pytest
 import torch
 
 from dllm.core.samplers.dependency import resolve_llada_attention_structure
+from dllm.core.samplers.dependency_non_lookahead import (
+    DependencyNonLookaheadSampler,
+    DependencyNonLookaheadSamplerConfig,
+)
 from dllm.core.samplers.dependency_guided import (
     DependencyGuidedSamplerConfig,
     SUPPORTED_PROPOSAL_STRATEGIES,
@@ -596,6 +600,53 @@ def test_existing_scheduler_control_uses_soft_full_positions_at_requested_size()
         and record["candidate_collapse"] is False
         for record in output.diagnostics[0]
     )
+
+
+@pytest.mark.parametrize(
+    "candidate_selector",
+    ("max_confidence", "min_entropy", "min_top2_margin"),
+)
+def test_non_lookahead_dependency_selector_uses_only_base_forwards(
+    candidate_selector,
+):
+    model = _make_tiny_llada()
+    forward_calls = 0
+
+    def count_forward_calls(_module, _inputs, _output):
+        nonlocal forward_calls
+        forward_calls += 1
+
+    hook = model.register_forward_hook(count_forward_calls)
+    sampler = DependencyNonLookaheadSampler(model=model, tokenizer=_tokenizer())
+    config = DependencyNonLookaheadSamplerConfig(
+        max_new_tokens=4,
+        block_size=4,
+        steps=2,
+        temperature=0.0,
+        return_dict=True,
+        proposal_strategy="dependency",
+        candidate_budget=3,
+        dependency_last_n_layers=2,
+        dependency_position_temperature=0.0,
+        dependency_sink_filter_enabled=False,
+        dependency_cardinality_strategy="entropy_budget",
+        dependency_max_action_size=4,
+        dependency_entropy_budget=2.0,
+        dependency_size_scoring="per_token",
+        dependency_candidate_selector=candidate_selector,
+        diagnostic_metadata=False,
+    )
+
+    try:
+        output = sampler.sample([[3, 4]], config=config)
+    finally:
+        hook.remove()
+
+    assert output.histories is not None
+    assert forward_calls == len(output.histories) - 1
+    assert 1 <= forward_calls <= 4
+    assert output.selected_candidates
+    assert not torch.any(output.sequences[:, 2:] == _tokenizer().mask_token_id)
 
 
 def test_entropy_budget_path_is_wired_into_decoder_and_guarantees_progress():

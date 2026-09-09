@@ -60,7 +60,7 @@
       "candidate_budget": 4,
       "cardinality_strategy": "entropy_budget",
       "entropy_budget": 2.0,
-      "allowed_action_sizes": [1, 2, 4],
+      "possible_action_sizes": [1, 2, 3, 4],
       "maximum_action_size": 4,
       "size_scoring": "per_token"
     }

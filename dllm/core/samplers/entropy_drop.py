@@ -21,14 +21,21 @@ from dllm.core.samplers.batched_lookahead import (
 from dllm.core.samplers.counterfactual import entropy_per_token
 from dllm.core.samplers.dependency_guided import (
     DependencyGuidedSamplerConfig,
+    build_dependency_candidates,
     build_step_diagnostics,
     is_fixed_k_strategy,
+    release_dependency_capture_tensors,
     resolve_dependency_guided_config,
     run_base_forward_with_cfg_inputs,
     select_fixed_k_candidate,
     validate_fixed_k_schedule,
 )
 from dllm.core.samplers.mdlm import MDLMSampler
+from dllm.core.samplers.non_lookahead import (
+    NON_LOOKAHEAD_SELECTORS,
+    select_candidates_without_lookahead,
+    top2_probability_margin,
+)
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 from dllm.core.samplers.parallel_candidates import (
     initialize_committed_anchor_state,
@@ -43,6 +50,7 @@ class EntropyDropSamplerConfig(DependencyGuidedSamplerConfig):
     # The heuristic for generating candidate masks
     # "mixed" generates top-entropy and spaced anchors
     oracle_candidate_strategy: str = "mixed"
+    dependency_candidate_selector: str = "entropy_drop"
 class EntropyDropSampler(MDLMSampler):
     """
     Epiplexity Oracle Sampler with Entropy Drop for path selection.
@@ -246,6 +254,33 @@ class EntropyDropSampler(MDLMSampler):
         proposal_strategy = config.proposal_strategy
         cardinality_strategy = config.dependency_cardinality_strategy
         diagnostic_metadata = config.diagnostic_metadata
+        candidate_selector = kwargs.get(
+            "dependency_candidate_selector",
+            config.dependency_candidate_selector,
+        )
+        available_selectors = ("entropy_drop", *NON_LOOKAHEAD_SELECTORS)
+        if candidate_selector not in available_selectors:
+            raise ValueError(
+                "dependency_candidate_selector must be one of "
+                f"{available_selectors}, got {candidate_selector!r}."
+            )
+        if candidate_selector != "entropy_drop":
+            if proposal_strategy != "dependency":
+                raise ValueError(
+                    "Non-lookahead candidate selection requires "
+                    "proposal_strategy='dependency'."
+                )
+            if cardinality_strategy not in {"scheduler", "entropy_budget"}:
+                raise ValueError(
+                    "Non-lookahead candidate selection requires "
+                    "dependency_cardinality_strategy='scheduler' or "
+                    "'entropy_budget'."
+                )
+            if diagnostic_metadata:
+                raise ValueError(
+                    "Non-lookahead candidate selection currently requires "
+                    "diagnostic_metadata=False."
+                )
 
         assert 1 <= block_size
         assert 1 <= steps
@@ -432,28 +467,72 @@ class EntropyDropSampler(MDLMSampler):
                     active_rows = num_transfer > 0
                     proposal_mask = current_block_mask & active_rows[:, None]
                     step_seed = config.dependency_generation_seed + global_step_index
-                    selection = select_fixed_k_candidate(
-                        self.model,
-                        x,
-                        x0,
-                        base_forward=base_forward,
-                        base_metric_map=base_entropy_map,
-                        entropy_map=base_entropy_map,
-                        confidence=x0_p,
-                        metric="entropy_drop",
-                        active_mask=proposal_mask,
-                        requested_k=num_transfer,
-                        anchor_state=anchor_state,
-                        masked_active_mask=mask_index,
-                        response_mask=response_mask,
-                        attention_mask=attention_mask,
-                        config=config,
-                        generation_seed=step_seed,
-                    )
-                    best_c_idx = selection.lookahead.best_mask
-                    best_candidate_names = [
-                        name or "" for name in selection.lookahead.best_names
-                    ]
+                    if candidate_selector == "entropy_drop":
+                        selection = select_fixed_k_candidate(
+                            self.model,
+                            x,
+                            x0,
+                            base_forward=base_forward,
+                            base_metric_map=base_entropy_map,
+                            entropy_map=base_entropy_map,
+                            confidence=x0_p,
+                            metric="entropy_drop",
+                            active_mask=proposal_mask,
+                            requested_k=num_transfer,
+                            anchor_state=anchor_state,
+                            masked_active_mask=mask_index,
+                            response_mask=response_mask,
+                            attention_mask=attention_mask,
+                            config=config,
+                            generation_seed=step_seed,
+                        )
+                        best_c_idx = selection.lookahead.best_mask
+                        best_candidate_names = [
+                            name or "" for name in selection.lookahead.best_names
+                        ]
+                    else:
+                        candidates, _, _, _ = build_dependency_candidates(
+                            base_forward,
+                            active_mask=proposal_mask,
+                            requested_k=num_transfer,
+                            anchor_state=anchor_state,
+                            response_mask=response_mask,
+                            attention_mask=attention_mask,
+                            entropy_map=base_entropy_map,
+                            confidence=x0_p,
+                            config=config,
+                            generation_seed=step_seed,
+                        )
+                        captures_released = release_dependency_capture_tensors(
+                            base_forward
+                        )
+                        if base_forward.capture_active_after_forward:
+                            raise RuntimeError(
+                                "Candidate selection cannot start while dependency "
+                                "capture is active."
+                            )
+                        if not captures_released:
+                            raise RuntimeError(
+                                "Captured Q/K tensors remained live after candidate "
+                                "generation."
+                            )
+                        top2_margin = (
+                            top2_probability_margin(p)
+                            if candidate_selector == "min_top2_margin"
+                            else None
+                        )
+                        simple_selection = select_candidates_without_lookahead(
+                            candidates,
+                            confidence=x0_p,
+                            entropy=base_entropy_map,
+                            top2_margin=top2_margin,
+                            selector=candidate_selector,
+                        )
+                        best_c_idx = simple_selection.best_mask
+                        best_candidate_names = [
+                            name or "" for name in simple_selection.best_names
+                        ]
+                        selection = None
                     anchor_state_before = anchor_state
                     if anchor_state is not None:
                         anchor_state_after = record_committed_anchors(
@@ -466,6 +545,11 @@ class EntropyDropSampler(MDLMSampler):
                     else:
                         anchor_state_after = None
                     if diagnostics is not None:
+                        if selection is None:
+                            raise RuntimeError(
+                                "Lookahead diagnostics require an entropy-drop "
+                                "selection result."
+                            )
                         step_diagnostics = build_step_diagnostics(
                             selection,
                             base_forward,

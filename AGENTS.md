@@ -8,3 +8,5 @@
 - When writing new code: preview existing code first, reuse existing modules where possible, and keep the new code’s style consistent with the codebase.
 - Before running scripts: source `~/.zshrc` and activate conda env `dllm` (e.g. `conda activate ~/miniconda3/envs/dllm`).
 - For tasks requiring a GPU, use the following command: `srun -p $PARTITION --quotatype=$QUOTATYPE --gres=gpu:1 --cpus-per-task=24 --time=03:00:00 python ...`.
+- Never use CUDA_VISIBLE_DEVICES
+- Never run scripts on the login node. When running scripts on a compute node, give me the command and never run it yourself.

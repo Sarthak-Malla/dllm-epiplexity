@@ -20,9 +20,6 @@ from dllm.core.samplers.candidates import CandidateBatch, dependency_anchor_scor
 from dllm.core.samplers.parallel_candidates import (
     CommittedAnchorState,
     _seed_order,
-    _set_statistics,
-    _stable_best,
-    _subset_objective,
     _validate_bool_mask,
     _validate_position_values,
     anchor_support_scores,
@@ -153,42 +150,135 @@ def _construct_stopped_soft_full_subset(
     utility_threshold: float,
     entropy_budget: float,
 ) -> tuple[list[int], list[float], str]:
-    """Grow one frozen soft-full ordering and stop without verifier feedback."""
-    selected = [seed]
-    accepted_marginals = [float(utility[seed])]
-    cumulative_entropy = float(entropy[seed])
-    stop_reason = "maximum_action_size"
-    while len(selected) < maximum_action_size:
-        remaining = [
-            position
-            for position in eligible_positions
-            if position not in selected
-        ]
-        if not remaining:
-            stop_reason = "eligible_exhausted"
-            break
-        marginal = torch.full_like(utility, -torch.inf)
-        for position in remaining:
-            risk = 1.0 - torch.minimum(
-                confidence[position], confidence[selected]
-            )
-            penalty = (conflict[position, selected] * risk).sum()
-            marginal[position] = utility[position] - conflict_penalty * penalty
-        chosen = _stable_best(remaining, marginal)
-        chosen_marginal = float(marginal[chosen])
-        if stopping_rule == "marginal_utility" and chosen_marginal <= utility_threshold:
+    """Grow one soft-full ordering with vectorized device-side marginal scores."""
+    growth_limit = min(maximum_action_size, len(eligible_positions))
+    selected_indices = torch.empty(
+        growth_limit,
+        device=utility.device,
+        dtype=torch.long,
+    )
+    accepted_marginals = torch.empty(
+        growth_limit,
+        device=utility.device,
+        dtype=utility.dtype,
+    )
+    selected_mask = torch.zeros_like(utility, dtype=torch.bool)
+    eligible_mask = torch.zeros_like(utility, dtype=torch.bool)
+    eligible_indices = torch.as_tensor(
+        eligible_positions,
+        device=utility.device,
+        dtype=torch.long,
+    )
+    eligible_mask[eligible_indices] = True
+
+    selected_indices[0] = seed
+    accepted_marginals[0] = utility[seed]
+    selected_mask[seed] = True
+    for selected_count in range(1, growth_limit):
+        current_indices = selected_indices[:selected_count]
+        selected_confidence = confidence.index_select(0, current_indices)
+        interaction_risk = 1.0 - torch.minimum(
+            confidence.unsqueeze(-1),
+            selected_confidence.unsqueeze(0),
+        )
+        conflict_penalties = (
+            conflict.index_select(1, current_indices) * interaction_risk
+        ).sum(dim=-1)
+        marginal = utility - float(conflict_penalty) * conflict_penalties
+        marginal = marginal.masked_fill(~(eligible_mask & ~selected_mask), -torch.inf)
+        chosen_marginal, chosen = torch.max(marginal, dim=0)
+        selected_indices[selected_count] = chosen
+        accepted_marginals[selected_count] = chosen_marginal
+        selected_mask[chosen] = True
+
+    # Transfer the completed greedy path in bulk. Stopping never influences
+    # which position would be selected next, so applying the rule to this path
+    # exactly reproduces early stopping without per-iteration synchronization.
+    path = selected_indices.detach().cpu().tolist()
+    marginal_path = accepted_marginals.detach().cpu().tolist()
+    entropy_path = entropy.index_select(0, selected_indices).detach().cpu().tolist()
+    accepted_count = 1
+    cumulative_entropy = float(entropy_path[0])
+    stop_reason = (
+        "eligible_exhausted"
+        if growth_limit < maximum_action_size
+        else "maximum_action_size"
+    )
+    for index in range(1, growth_limit):
+        chosen_marginal = float(marginal_path[index])
+        if (
+            stopping_rule == "marginal_utility"
+            and chosen_marginal <= utility_threshold
+        ):
             stop_reason = "marginal_utility_threshold"
             break
+        chosen_entropy = float(entropy_path[index])
         if (
             stopping_rule == "entropy_budget"
-            and cumulative_entropy + float(entropy[chosen]) > entropy_budget
+            and cumulative_entropy + chosen_entropy > entropy_budget
         ):
             stop_reason = "entropy_budget"
             break
-        selected.append(chosen)
-        accepted_marginals.append(chosen_marginal)
-        cumulative_entropy += float(entropy[chosen])
-    return selected, accepted_marginals, stop_reason
+        accepted_count += 1
+        cumulative_entropy += chosen_entropy
+
+    selected = [int(position) for position in path[:accepted_count]]
+    accepted = [float(value) for value in marginal_path[:accepted_count]]
+    return selected, accepted, stop_reason
+
+
+def _device_set_metrics(
+    selected: list[int],
+    *,
+    utility: torch.Tensor,
+    confidence: torch.Tensor,
+    conflict: torch.Tensor,
+    support: torch.Tensor,
+    conflict_penalty: float,
+) -> tuple[float, float, float, float]:
+    """Compute candidate statistics on-device and transfer four scalars once."""
+    indices = torch.as_tensor(
+        selected,
+        device=utility.device,
+        dtype=torch.long,
+    )
+    selected_utility = utility.index_select(0, indices).double()
+    selected_support = support.index_select(0, indices).double()
+    objective = selected_utility.sum()
+    mean_conflict = objective.new_zeros(())
+    max_conflict = objective.new_zeros(())
+    if indices.numel() > 1:
+        pair_indices = torch.triu_indices(
+            indices.numel(),
+            indices.numel(),
+            offset=1,
+            device=utility.device,
+        )
+        left = indices.index_select(0, pair_indices[0])
+        right = indices.index_select(0, pair_indices[1])
+        pair_conflict = conflict[left, right].double()
+        selected_confidence = confidence.double()
+        pair_risk = 1.0 - torch.minimum(
+            selected_confidence[left],
+            selected_confidence[right],
+        )
+        mean_conflict = pair_conflict.mean()
+        max_conflict = pair_conflict.max()
+        objective = objective - float(conflict_penalty) * (
+            pair_conflict * pair_risk
+        ).sum()
+    values = torch.stack(
+        (mean_conflict, max_conflict, objective, selected_support.sum())
+    )
+    mean_value, max_value, objective_value, support_value = (
+        values.detach().cpu().tolist()
+    )
+    return (
+        float(mean_value),
+        float(max_value),
+        float(objective_value),
+        float(support_value),
+    )
 
 
 def generate_stopped_soft_full_candidates(
@@ -271,11 +361,15 @@ def generate_stopped_soft_full_candidates(
     generator.manual_seed(generation_seed)
 
     selected_by_batch: list[list[dict[str, object]]] = []
+    seed_attempt_counts: list[int] = []
+    full_set_short_circuits: list[bool] = []
     maximum_output_count = 0
     for batch_index in range(batch_size):
         positions = torch.where(eligible[batch_index])[0].tolist()
         if not positions:
             selected_by_batch.append([])
+            seed_attempt_counts.append(0)
+            full_set_short_circuits.append(False)
             continue
         target = min(candidate_budget, len(positions))
         seeds = _seed_order(
@@ -286,7 +380,10 @@ def generate_stopped_soft_full_candidates(
         )
         records: list[dict[str, object]] = []
         seen: set[tuple[int, ...]] = set()
+        seed_attempt_count = 0
+        full_set_short_circuit = False
         for seed_rank, seed in enumerate(seeds):
+            seed_attempt_count += 1
             selected, marginals, stop_reason = _construct_stopped_soft_full_subset(
                 seed=seed,
                 eligible_positions=positions,
@@ -304,27 +401,28 @@ def generate_stopped_soft_full_candidates(
             if canonical in seen:
                 continue
             seen.add(canonical)
-            mean_conflict, max_conflict = _set_statistics(
-                conflict_output.matrix[batch_index], selected
+            (
+                mean_conflict,
+                max_conflict,
+                objective,
+                support_sum,
+            ) = _device_set_metrics(
+                selected,
+                utility=utility[batch_index],
+                confidence=confidence[batch_index],
+                conflict=conflict_output.matrix[batch_index],
+                support=support[batch_index],
+                conflict_penalty=float(conflict_penalty),
             )
             records.append(
                 {
                     "positions": canonical,
                     "construction_order": tuple(selected),
                     "seed": seed,
-                    "score": _subset_objective(
-                        selected,
-                        utility[batch_index],
-                        conflict_output.matrix[batch_index],
-                        confidence[batch_index],
-                        conflict_penalty=float(conflict_penalty),
-                    ),
+                    "score": objective,
                     "mean_conflict": mean_conflict,
                     "max_conflict": max_conflict,
-                    "support_sum": sum(
-                        float(support[batch_index, position])
-                        for position in selected
-                    ),
+                    "support_sum": support_sum,
                     "seed_rank": seed_rank,
                     "accepted_marginals": tuple(marginals),
                     "stop_reason": stop_reason,
@@ -332,6 +430,12 @@ def generate_stopped_soft_full_candidates(
                     "fallback_source": None,
                 }
             )
+            # If this candidate contains every eligible position, all later
+            # seeds must produce the same canonical set. Avoid constructing
+            # those duplicates before the singleton-diversity refill below.
+            if len(selected) == len(positions):
+                full_set_short_circuit = True
+                break
             if len(records) == target:
                 break
 
@@ -366,6 +470,8 @@ def generate_stopped_soft_full_candidates(
         if len(records) != target:
             raise RuntimeError("could not fill the adaptive candidate budget.")
         selected_by_batch.append(records)
+        seed_attempt_counts.append(seed_attempt_count)
+        full_set_short_circuits.append(full_set_short_circuit)
         maximum_output_count = max(maximum_output_count, len(records))
 
     requested = torch.full(
@@ -555,6 +661,8 @@ def generate_stopped_soft_full_candidates(
             "candidate_refill": "adaptive_singleton_diversity",
             "expected_candidate_count_by_batch": expected_counts,
             "candidate_action_set_count_by_batch": action_set_counts,
+            "seed_attempt_count_by_batch": tuple(seed_attempt_counts),
+            "full_set_short_circuit_by_batch": tuple(full_set_short_circuits),
         },
         action_sizes=candidate_masks.sum(dim=-1, dtype=torch.long),
     )

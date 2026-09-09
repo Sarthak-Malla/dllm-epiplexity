@@ -53,6 +53,12 @@ def test_reduced_plan_contains_only_the_four_new_full_cells():
     }
     assert plan["execution"]["job_count"] == 4
     assert plan["execution"]["gpus_per_job"] == 2
+    entropy_method = next(
+        method
+        for method in plan["methods"]
+        if method["name"] == "dependency_entropy_budget_n4"
+    )
+    assert entropy_method["possible_action_sizes"] == [1, 2, 3, 4]
     assert plan["tasks"]["gsm8k_cot"] | {
         "total_examples": 1319,
         "max_new_tokens": 256,

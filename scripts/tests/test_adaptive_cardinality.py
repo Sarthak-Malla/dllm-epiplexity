@@ -10,7 +10,9 @@ Run with:
 import pytest
 import torch
 
+from dllm.core.samplers import adaptive_cardinality
 from dllm.core.samplers.adaptive_cardinality import (
+    _construct_stopped_soft_full_subset,
     apply_size_aware_scoring,
     generate_joint_k_dependency_candidates,
     generate_stopped_soft_full_candidates,
@@ -74,6 +76,62 @@ def _lookahead(candidates: CandidateBatch, scores: tuple[float, float]):
         model_calls=2,
         candidate_chunk_size=1,
     )
+
+
+def _scalar_stopped_subset_reference(
+    *,
+    seed,
+    eligible_positions,
+    maximum_action_size,
+    utility,
+    entropy,
+    confidence,
+    conflict,
+    conflict_penalty,
+    stopping_rule,
+    utility_threshold,
+    entropy_budget,
+):
+    """Reproduce the original scalar implementation for parity tests."""
+    selected = [seed]
+    marginals = [float(utility[seed])]
+    cumulative_entropy = float(entropy[seed])
+    stop_reason = "maximum_action_size"
+    while len(selected) < maximum_action_size:
+        remaining = [
+            position
+            for position in eligible_positions
+            if position not in selected
+        ]
+        if not remaining:
+            stop_reason = "eligible_exhausted"
+            break
+        marginal = torch.full_like(utility, -torch.inf)
+        for position in remaining:
+            risk = 1.0 - torch.minimum(
+                confidence[position], confidence[selected]
+            )
+            penalty = (conflict[position, selected] * risk).sum()
+            marginal[position] = utility[position] - conflict_penalty * penalty
+        chosen = max(
+            remaining,
+            key=lambda position: (float(marginal[position]), -position),
+        )
+        chosen_marginal = float(marginal[chosen])
+        if stopping_rule == "marginal_utility" and (
+            chosen_marginal <= utility_threshold
+        ):
+            stop_reason = "marginal_utility_threshold"
+            break
+        if stopping_rule == "entropy_budget" and (
+            cumulative_entropy + float(entropy[chosen]) > entropy_budget
+        ):
+            stop_reason = "entropy_budget"
+            break
+        selected.append(chosen)
+        marginals.append(chosen_marginal)
+        cumulative_entropy += float(entropy[chosen])
+    return selected, marginals, stop_reason
 
 
 def test_action_size_parser_requires_sorted_unique_positive_sizes():
@@ -143,6 +201,81 @@ def test_entropy_budget_stops_before_an_uncertain_addition():
     assert candidates.metadata[0]["stopping_reason_by_batch"] == (
         "entropy_budget",
     )
+
+
+@pytest.mark.parametrize(
+    ("stopping_rule", "utility_threshold", "entropy_budget"),
+    (("marginal_utility", 0.1, 10.0), ("entropy_budget", 0.0, 0.8)),
+)
+def test_vectorized_stopped_subset_matches_scalar_reference(
+    stopping_rule,
+    utility_threshold,
+    entropy_budget,
+):
+    torch.manual_seed(19)
+    utility = torch.rand(9)
+    entropy = torch.rand(9) * 0.3
+    confidence = torch.rand(9)
+    conflict = torch.rand((9, 9))
+    conflict = 0.5 * (conflict + conflict.T)
+    conflict.fill_diagonal_(0)
+    arguments = {
+        "seed": 3,
+        "eligible_positions": [0, 1, 3, 4, 6, 7, 8],
+        "maximum_action_size": 6,
+        "utility": utility,
+        "entropy": entropy,
+        "confidence": confidence,
+        "conflict": conflict,
+        "conflict_penalty": 0.7,
+        "stopping_rule": stopping_rule,
+        "utility_threshold": utility_threshold,
+        "entropy_budget": entropy_budget,
+    }
+
+    expected_selected, expected_marginals, expected_reason = (
+        _scalar_stopped_subset_reference(**arguments)
+    )
+    selected, marginals, reason = _construct_stopped_soft_full_subset(**arguments)
+
+    assert selected == expected_selected
+    assert marginals == pytest.approx(expected_marginals)
+    assert reason == expected_reason
+
+
+def test_full_set_candidate_avoids_rebuilding_duplicate_for_every_seed(monkeypatch):
+    dependency = torch.zeros((1, 64, 64), dtype=torch.float32)
+    entropy = torch.zeros((1, 64), dtype=torch.float32)
+    confidence = torch.full((1, 64), 0.9)
+    eligible = torch.ones((1, 64), dtype=torch.bool)
+    original = adaptive_cardinality._construct_stopped_soft_full_subset
+    calls = []
+
+    def counted_construct(**kwargs):
+        calls.append(kwargs["seed"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        adaptive_cardinality,
+        "_construct_stopped_soft_full_subset",
+        counted_construct,
+    )
+    candidates = generate_stopped_soft_full_candidates(
+        dependency,
+        entropy,
+        confidence,
+        eligible,
+        candidate_budget=4,
+        maximum_action_size=64,
+        stopping_rule="entropy_budget",
+        entropy_budget=2.0,
+        generation_seed=42,
+    )
+
+    assert len(calls) == 1
+    assert candidates.action_sizes[:, 0].tolist() == [64, 1, 1, 1]
+    assert candidates.configuration["seed_attempt_count_by_batch"] == (1,)
+    assert candidates.configuration["full_set_short_circuit_by_batch"] == (True,)
 
 
 def test_joint_pool_includes_size_identity_and_clips_when_masks_are_fewer():
