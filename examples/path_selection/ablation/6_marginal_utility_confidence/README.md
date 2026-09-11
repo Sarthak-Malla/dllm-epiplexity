@@ -1,7 +1,7 @@
 # Ablation 6: Marginal utility with confidence weighting
 
 Test higher marginal thresholds and confidence weighting separately. The default
-is a diagnostic sweep over the first 128 GSM8K questions. Token temperature stays
+is a diagnostic sweep over the first 300 GSM8K questions. Token temperature stays
 0.0; candidate seed position temperature stays 1.0. All configurations use four
 soft-full candidates, entropy-drop lookahead, per-token scoring, and maximum
 action size 64 within a 64-token block. Entropy-budget stopping is disabled.
@@ -50,8 +50,8 @@ done
 ```
 
 Diagnostic results and caches are isolated under
-`/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/ablation/6_marginal_utility_confidence/marginal_confidence_v1/gsm8k_cot/confidence_exponent<eta>/marginal_utility_tau<tau>/limit128/seed42`.
-Full runs omit the `limit128` component. W&B names identify both parameters and
+`/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/ablation/6_marginal_utility_confidence/marginal_confidence_v1/gsm8k_cot/confidence_exponent<eta>/marginal_utility_tau<tau>/limit300/seed42`.
+Full runs omit the `limit300` component. W&B names identify both parameters and
 the sample limit. `ABLATION6_RUN_TAG` overrides the run tag. Each run keeps the
 five-shot prompt, 256-token generation length, proposal seed 42, and evaluation
 seed tuple `0,1234,1234,1234` used by the earlier ablations.
@@ -60,5 +60,5 @@ Compare accuracy, first-action size and entropy, next-pass consistency, and mode
 calls. Existing Ablation 4 runs supply exponent-zero references at τ=0 and 0.5;
 the completed entropy-budget-2 reference remains at
 `/home/sarthak.malla/dllm-selection-ensemble/eval_results/path_selection/ablation/2_entropy_budget_without_k_limit/vectorized_soft_full_v1/gsm8k_cot/entropy_budget2.0/seed42`.
-For the diagnostic sweep, compare the same first 128 documents from those saved
+For the diagnostic sweep, compare the same first 300 documents from those saved
 samples, rather than their full-dataset aggregate scores.

@@ -3,8 +3,9 @@
 #SBATCH --output=/home/sarthak.malla/dllm-selection-ensemble/.logs/%x_%A_%a.out
 #SBATCH --error=/home/sarthak.malla/dllm-selection-ensemble/.logs/%x_%A_%a.err
 #SBATCH --array=0-7%2
-#SBATCH --time=9:00:00
+#SBATCH --time=1:30:00
 #SBATCH --nodes=1
+#SBATCH --exclude=gpu-51
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -12,7 +13,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 
-# Submit the eight configurations on 128 GSM8K questions:
+# Submit the eight configurations on 300 GSM8K questions:
 #   sbatch /home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/ablation/6_marginal_utility_confidence/run_gsm8k_marginal_utility_confidence.slurm.sh
 # Set ABLATION6_LIMIT=full to evaluate all questions. Override --array to
 # select configurations; each array task uses two GPUs, with two tasks at once.
@@ -34,7 +35,7 @@ case "${SLURM_ARRAY_TASK_ID:-0}" in
         ;;
 esac
 
-evaluation_limit=${ABLATION6_LIMIT:-128}
+evaluation_limit=${ABLATION6_LIMIT:-300}
 if [ "${evaluation_limit}" = full ]; then
     evaluation_limit=
 fi

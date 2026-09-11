@@ -9,6 +9,9 @@ Run with:
 
 import pytest
 import torch
+from unittest import mock
+
+from dllm.core.samplers import parallel_candidates as parallel_module
 
 from dllm.core.samplers.parallel_candidates import (
     anchor_support_scores,
@@ -32,6 +35,80 @@ def _four_position_case():
     confidence = torch.zeros((1, 4), dtype=torch.float32)
     eligible = torch.ones((1, 4), dtype=torch.bool)
     return dependency, entropy, confidence, eligible
+
+
+def _seed_direction_case():
+    """Make incoming, entropy-weighted incoming, and confidence prefer different seeds."""
+    dependency = torch.zeros((1, 5, 5))
+    dependency[0, 0, 1] = 4.0
+    dependency[0, 2, 1] = 3.0
+    dependency[0, 1, 3] = 0.5
+    return (dependency, torch.tensor([[1.0, 3.0, 1.0, 0.1, 1.0]]),
+            torch.tensor([[0.95, 0.6, 0.7, 0.8, 0.5]]), torch.ones((1, 5), dtype=torch.bool))
+
+
+@pytest.mark.parametrize("strategy,weight,seed,positions", [
+    ("legacy", 0.0, 0, [0, 2]),
+    ("incoming", 0.0, 1, [0, 1]),
+    ("incoming", 1.0, 3, [0, 3]),
+    ("confidence", 0.0, 0, [0, 2]),
+])
+def test_seed_direction_and_own_entropy_change_seed_without_changing_companion_rule(strategy, weight, seed, positions):
+    # Incoming scores: seed 1 = .6*(4*1+3*1)=4.2; seed 3 = .8*.5*3=1.2.
+    # Own-entropy weighting reverses them: 4.2*exp(-3) < 1.2*exp(-.1).
+    # Outgoing companion utility still ranks position 0 first, then position 2.
+    pool = generate_parallel_dependency_candidates(
+        *_seed_direction_case(), requested_k=2, candidate_budget=1,
+        confidence_exponent=1.0, conflict_penalty=0.0, position_temperature=0.0,
+        seed_strategy=strategy, seed_entropy_weight=weight,
+    )
+    assert pool.seed_anchors[0, 0].item() == seed
+    assert pool.selected_positions[0, 0].tolist() == positions
+
+
+def test_seed_overrides_leave_companion_inputs_and_refill_order_unchanged():
+    inputs = _seed_direction_case()
+    snapshots = []
+    for strategy, weight in (("legacy", 0.0), ("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0)):
+        # Fix seed order to compare construction given identical seeds. A full
+        # pool forces the combination refill path after seed-generated groups.
+        with (
+            mock.patch.object(parallel_module, "_seed_order", return_value=list(range(5))),
+            mock.patch.object(parallel_module, "_construct_subset", wraps=parallel_module._construct_subset) as construct,
+        ):
+            pool = generate_parallel_dependency_candidates(
+                *inputs, requested_k=2, candidate_budget=10, confidence_exponent=1.0,
+                seed_strategy=strategy, seed_entropy_weight=weight,
+            )
+            snapshots.append((pool, construct.call_args_list))
+    original, original_calls = snapshots[0]
+    for pool, calls in snapshots[1:]:
+        assert torch.equal(pool.candidate_masks, original.candidate_masks)
+        assert torch.equal(pool.proposal_scores, original.proposal_scores)
+        assert len(calls) == len(original_calls)
+        for call, reference in zip(calls, original_calls):
+            for key in ("base_utility", "support", "confidence", "conflict"):
+                assert torch.equal(call.kwargs[key], reference.kwargs[key])
+
+
+def test_legacy_seed_default_preserves_candidates_and_rng_order():
+    kwargs = dict(requested_k=2, candidate_budget=6, confidence_exponent=1.0, generation_seed=42)
+    default = generate_parallel_dependency_candidates(*_seed_direction_case(), **kwargs)
+    explicit = generate_parallel_dependency_candidates(
+        *_seed_direction_case(), **kwargs, seed_strategy="legacy", seed_entropy_weight=0.0,
+    )
+    assert torch.equal(default.candidate_masks, explicit.candidate_masks)
+    assert torch.equal(default.seed_anchors, explicit.seed_anchors)
+    assert torch.equal(default.proposal_scores, explicit.proposal_scores)
+
+
+@pytest.mark.parametrize("strategy,weight", [("bad", 0), ("legacy", 1), ("confidence", 1), ("incoming", -1), ("incoming", float("nan"))])
+def test_invalid_seed_settings_fail_early(strategy, weight):
+    with pytest.raises(ValueError):
+        generate_parallel_dependency_candidates(
+            *_seed_direction_case(), requested_k=2, candidate_budget=1,
+            seed_strategy=strategy, seed_entropy_weight=weight,
+        )
 
 
 def test_asymmetric_dependency_becomes_symmetric_masked_only_conflict():

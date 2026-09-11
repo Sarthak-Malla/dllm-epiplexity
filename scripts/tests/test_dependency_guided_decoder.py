@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from dllm.core.samplers.dependency import resolve_llada_attention_structure
+from dllm.core.samplers import dependency_guided as guided_module
 from dllm.core.samplers.dependency_non_lookahead import (
     DependencyNonLookaheadSampler,
     DependencyNonLookaheadSamplerConfig,
@@ -101,6 +102,55 @@ def test_fixed_k_schedule_rejects_multi_token_commits():
     validate_fixed_k_schedule(torch.tensor([[1, 1, 0]]))
     with pytest.raises(ValueError, match="exactly one token"):
         validate_fixed_k_schedule(torch.tensor([[1, 2]]))
+
+
+@pytest.mark.parametrize("strategy,weight", [("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0)])
+def test_seed_controls_reach_candidate_generation_and_diagnostics(monkeypatch, strategy, weight):
+    original = guided_module.generate_parallel_dependency_candidates
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(guided_module, "generate_parallel_dependency_candidates", capture)
+    sampler = EntropyDropSampler(model=_make_tiny_llada(), tokenizer=_tokenizer())
+    config = EntropyDropSamplerConfig(
+        max_new_tokens=4, block_size=4, steps=2, temperature=0.0, return_dict=True,
+        proposal_strategy="dependency", candidate_budget=2, dependency_commit_k=2,
+        dependency_last_n_layers=2, dependency_sink_filter_enabled=False,
+        dependency_confidence_exponent=1.0, dependency_direction="outgoing",
+        diagnostic_metadata=True,
+    )
+    # Exercise sampler-call overrides, the same shared config resolver used by evaluation.
+    output = sampler.sample([[3, 4]], config=config,
+                            dependency_seed_strategy=strategy, dependency_seed_entropy_weight=weight)
+    assert len(calls) == 2
+    for call in calls:
+        assert call["seed_strategy"] == strategy
+        assert call["seed_entropy_weight"] == weight
+        assert call["direction"] == "outgoing"
+        assert call["confidence_exponent"] == 1.0
+    assert output.diagnostics is not None
+    for step in output.diagnostics[0]:
+        assert step["dependency_seed_strategy"] == strategy
+        assert step["dependency_seed_entropy_weight"] == weight
+        for candidate in step["candidates"]:
+            if candidate["valid"]:
+                assert candidate["seed_position"] in candidate["positions"]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"dependency_seed_strategy": "unknown"},
+    {"dependency_seed_strategy": "confidence", "dependency_seed_entropy_weight": 1.0},
+    {"dependency_seed_strategy": "incoming", "dependency_commit_k": 1},
+    {"dependency_seed_strategy": "incoming", "dependency_cardinality_strategy": "entropy_budget"},
+])
+def test_seed_controls_reject_unsupported_paths(overrides):
+    settings = dict(proposal_strategy="dependency", dependency_commit_k=4, dependency_size_scoring="per_token")
+    settings.update(overrides)
+    with pytest.raises(ValueError):
+        validate_dependency_guided_config(DependencyGuidedSamplerConfig(**settings))
 
 
 @pytest.mark.parametrize(
@@ -373,6 +423,8 @@ def test_parallel_dependency_path_is_exact_valid_and_reproducible(
         selected = first_record["selected_candidate"]
         assert selected is not None
         assert len(selected["positions"]) == commit_k
+        assert selected["token_ids"] == first.sequences[0, selected["positions"]].tolist()
+        assert selected["token_ids"] == second_record["selected_candidate"]["token_ids"]
         assert len(set(selected["positions"])) == commit_k
         assert set(selected["positions"]) <= response_positions
         if remaining < 4:
@@ -381,6 +433,11 @@ def test_parallel_dependency_path_is_exact_valid_and_reproducible(
             if not candidate["valid"]:
                 continue
             assert len(candidate["positions"]) == commit_k
+            assert len(candidate["token_ids"]) == commit_k
+            predicted = dict(zip(candidate["positions"], candidate["token_ids"]))
+            for position, token_id in zip(selected["positions"], selected["token_ids"]):
+                if position in predicted:
+                    assert predicted[position] == token_id
             assert candidate["heldout_count"] == remaining - commit_k
             assert set(candidate["positions"]).isdisjoint(revealed_positions)
         first_selected_positions.append(tuple(selected["positions"]))

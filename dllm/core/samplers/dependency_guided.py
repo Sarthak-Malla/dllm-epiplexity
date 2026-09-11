@@ -54,6 +54,7 @@ from dllm.core.samplers.mdlm import MDLMSamplerConfig
 from dllm.core.samplers.parallel_candidates import (
     CONFLICT_NORMALIZATIONS,
     PARALLEL_VARIANTS,
+    SEED_STRATEGIES,
     CommittedAnchorState,
     gather_committed_anchor_state,
     generate_parallel_dependency_candidates,
@@ -86,6 +87,8 @@ class DependencyGuidedSamplerConfig(MDLMSamplerConfig):
     dependency_target_weighting: str = "entropy"
     dependency_position_temperature: float = 1.0
     dependency_confidence_exponent: float = 0.0
+    dependency_seed_strategy: str = "legacy"
+    dependency_seed_entropy_weight: float = 0.0
     dependency_generation_seed: int = 42
     dependency_sink_filter_enabled: bool = True
     dependency_sink_quantile: float = 0.99
@@ -257,6 +260,16 @@ def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> 
             f"{config.dependency_target_weighting!r}. Available: "
             f"{', '.join(TARGET_WEIGHTINGS)}."
         )
+    if config.dependency_seed_strategy not in SEED_STRATEGIES:
+        raise ValueError(f"dependency_seed_strategy must be one of {SEED_STRATEGIES}.")
+    if config.dependency_seed_strategy != "legacy" and (
+        config.proposal_strategy != PROPOSED_PROPOSAL_STRATEGY
+        or config.dependency_cardinality_strategy != "fixed"
+        or config.dependency_commit_k <= 1
+    ):
+        raise ValueError("Custom seed strategies require fixed dependency construction with commit_k > 1.")
+    if config.dependency_seed_strategy != "incoming" and config.dependency_seed_entropy_weight != 0:
+        raise ValueError("dependency_seed_entropy_weight requires the incoming seed strategy.")
     if config.candidate_chunk_size is not None and (
         isinstance(config.candidate_chunk_size, bool)
         or not isinstance(config.candidate_chunk_size, int)
@@ -266,6 +279,7 @@ def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> 
     for name, value in (
         ("dependency_position_temperature", config.dependency_position_temperature),
         ("dependency_confidence_exponent", config.dependency_confidence_exponent),
+        ("dependency_seed_entropy_weight", config.dependency_seed_entropy_weight),
         ("dependency_conflict_penalty", config.dependency_conflict_penalty),
         (
             "dependency_hard_conflict_threshold",
@@ -682,6 +696,8 @@ def build_dependency_candidates(
                     config.dependency_hard_conflict_threshold
                 ),
                 name_prefix="parallel_candidate",
+                seed_strategy=config.dependency_seed_strategy,
+                seed_entropy_weight=config.dependency_seed_entropy_weight,
                 **shared_parallel_kwargs,
             )
     else:
@@ -971,10 +987,20 @@ def build_step_diagnostics(
                     "index": candidate_index,
                     "name": name,
                     "valid": valid,
+                    "seed_position": (
+                        int(candidates.seed_anchors[candidate_index, batch_index].item())
+                        if valid else None
+                    ),
                     "positions": [
                         int(position)
                         for position in positions[positions >= 0].tolist()
                     ],
+                    # Aligned with positions: these are the same base predictions
+                    # used for lookahead and written into x for the winning set.
+                    "token_ids": (
+                        predicted_token_ids[batch_index, positions[positions >= 0]].tolist()
+                        if valid and predicted_token_ids is not None else None
+                    ),
                     "action_size": int(
                         candidates.candidate_masks[
                             candidate_index, batch_index
@@ -1240,6 +1266,8 @@ def build_step_diagnostics(
                     else None
                 ),
                 "dependency_direction": config.dependency_direction,
+                "dependency_seed_strategy": config.dependency_seed_strategy,
+                "dependency_seed_entropy_weight": config.dependency_seed_entropy_weight,
                 "dependency_target_weighting": (
                     config.dependency_target_weighting
                 ),

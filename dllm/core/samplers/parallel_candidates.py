@@ -20,6 +20,7 @@ from dllm.core.samplers.candidates import CandidateBatch, dependency_anchor_scor
 
 
 CONFLICT_NORMALIZATIONS = ("none", "max", "mean_positive")
+SEED_STRATEGIES = ("legacy", "incoming", "confidence")
 PARALLEL_VARIANTS = (
     "correlated_together",
     "top_confidence",
@@ -639,6 +640,8 @@ def generate_parallel_dependency_candidates(
     direction: str = "outgoing",
     target_weighting: str = "entropy",
     confidence_exponent: float = 0.0,
+    seed_strategy: str = "legacy",
+    seed_entropy_weight: float = 0.0,
     anchor_state: CommittedAnchorState | None = None,
     conflict_normalization: str = "max",
     conflict_penalty: float = 1.0,
@@ -680,6 +683,8 @@ def generate_parallel_dependency_candidates(
     ).float()
     if variant not in PARALLEL_VARIANTS:
         raise ValueError(f"variant must be one of {PARALLEL_VARIANTS}.")
+    if seed_strategy not in SEED_STRATEGIES:
+        raise ValueError(f"seed_strategy must be one of {SEED_STRATEGIES}.")
     if (
         isinstance(candidate_budget, bool)
         or not isinstance(candidate_budget, int)
@@ -691,11 +696,14 @@ def generate_parallel_dependency_candidates(
         ("hard_conflict_threshold", hard_conflict_threshold),
         ("anchor_support_weight", anchor_support_weight),
         ("position_temperature", position_temperature),
+        ("seed_entropy_weight", seed_entropy_weight),
     ):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{name} must be numeric.")
         if not math.isfinite(float(value)) or value < 0:
             raise ValueError(f"{name} must be finite and nonnegative.")
+    if seed_strategy != "incoming" and seed_entropy_weight != 0:
+        raise ValueError("seed_entropy_weight requires the incoming seed strategy.")
     if (
         isinstance(generation_seed, bool)
         or not isinstance(generation_seed, int)
@@ -743,6 +751,28 @@ def generate_parallel_dependency_candidates(
         )
     else:
         seed_scores = base_scores
+
+    # Keep companion utility and combination-refill order on their legacy path.
+    # Only the seeds (including their existing Gumbel ordering) use the new score.
+    refill_scores = seed_scores
+    if seed_strategy == "incoming":
+        seed_scores = dependency_anchor_scores(
+            dependency, entropy, eligible,
+            direction="incoming", target_weighting="entropy",
+            confidence=confidence, confidence_exponent=1.0,
+        )
+        if seed_entropy_weight > 0:
+            # Avoid multiplying ineligible -inf by an underflowed zero weight.
+            seed_scores = torch.where(
+                eligible,
+                torch.where(eligible, seed_scores, 0.0)
+                * torch.exp(-float(seed_entropy_weight) * entropy),
+                torch.full_like(seed_scores, -torch.inf),
+            )
+    elif seed_strategy == "confidence":
+        seed_scores = torch.where(
+            eligible, confidence, torch.full_like(confidence, -torch.inf),
+        )
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(generation_seed)
@@ -808,7 +838,7 @@ def generate_parallel_dependency_candidates(
         if len(records) < target:
             ranked_positions = sorted(
                 positions,
-                key=lambda position: (-float(seed_scores[batch_index, position]), position),
+                key=lambda position: (-float(refill_scores[batch_index, position]), position),
             )
             for ranked_subset in combinations(ranked_positions, k):
                 canonical = tuple(sorted(ranked_subset))
@@ -983,6 +1013,10 @@ def generate_parallel_dependency_candidates(
         "direction": direction,
         "target_weighting": target_weighting,
         "confidence_exponent": float(confidence_exponent),
+        "seed_strategy": seed_strategy,
+        "seed_entropy_weight": float(seed_entropy_weight),
+        "seed_anchor_support": "legacy" if seed_strategy == "legacy" else "none",
+        "refill_ranking": "legacy_companion_utility",
         "conflict_definition": "0.5 * (D[i,j] + D[j,i])",
         "conflict_normalization": conflict_normalization,
         "conflict_scale_by_batch": tuple(

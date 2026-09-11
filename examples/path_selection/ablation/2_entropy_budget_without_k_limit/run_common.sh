@@ -60,10 +60,10 @@ fi
 
 case "${token_temperature}" in
     0|0.0) token_temperature=0.0 ;;
-    0.5) ;;
+    0.5|0.8) ;;
     1|1.0) token_temperature=1.0 ;;
     *)
-        echo "PATH_ABLATION_TOKEN_TEMPERATURE must be 0.0, 0.5, or 1.0" >&2
+        echo "PATH_ABLATION_TOKEN_TEMPERATURE must be 0.0, 0.5, 0.8, or 1.0" >&2
         exit 2
         ;;
 esac
