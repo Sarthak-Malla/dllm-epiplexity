@@ -1,19 +1,23 @@
 """Entropy-drop path-selection sampler.
 
-Run its focused CPU integration tests with:
-    source /apps/local/conda_init.sh
-    conda activate /home/sarthak.malla/.conda/envs/dllm
+Run its focused integration tests on a compute node with:
+    source ~/.zshrc
+    conda activate ~/miniconda3/envs/dllm
     pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
 """
 
 import math
-import numpy as np
+import time
 import torch
 import torch.nn.functional as F
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Dict, Optional, List, Union
 
 from dllm.core.samplers.base import BaseSamplerOutput
+from dllm.core.samplers.adaptive_cardinality import apply_size_aware_scoring
+from dllm.core.samplers.decoding_state import (
+    CommitValues, DecodeState, PreparedStep, RNGState, StepSelection, isolated_rng,
+)
 from dllm.core.samplers.batched_lookahead import (
     candidate_batch_from_mask_mapping,
     evaluate_batched_lookahead,
@@ -21,13 +25,17 @@ from dllm.core.samplers.batched_lookahead import (
 from dllm.core.samplers.counterfactual import entropy_per_token
 from dllm.core.samplers.dependency_guided import (
     DependencyGuidedSamplerConfig,
+    FixedKSelectionOutput,
+    _build_baseline_candidates,
+    _synchronize_for_timing,
+    build_confidence_threshold_candidates,
     build_dependency_candidates,
     build_step_diagnostics,
+    dependency_capture_required,
     is_fixed_k_strategy,
     release_dependency_capture_tensors,
     resolve_dependency_guided_config,
     run_base_forward_with_cfg_inputs,
-    select_fixed_k_candidate,
     validate_fixed_k_schedule,
 )
 from dllm.core.samplers.mdlm import MDLMSampler
@@ -222,372 +230,532 @@ class EntropyDropSampler(MDLMSampler):
         return result.best_mask, structure_gains, best_candidate_names
 
     
+    def _resolve_config(self, config=None, **kwargs):
+        """Resolve every sampler dataclass field, including selector overrides."""
+        config = config or EntropyDropSamplerConfig()
+        names = {item.name for item in fields(config)}
+        config = replace(config, **{key: value for key, value in kwargs.items() if key in names})
+        config = resolve_dependency_guided_config(config, {})
+        selectors = ("entropy_drop", *NON_LOOKAHEAD_SELECTORS)
+        if config.dependency_candidate_selector not in selectors:
+            raise ValueError(f"dependency_candidate_selector must be one of {selectors}.")
+        if config.dependency_candidate_selector != "entropy_drop":
+            if config.proposal_strategy not in {"dependency", "confidence_threshold"}:
+                raise ValueError("Non-lookahead candidate selection requires dependency proposals.")
+        if config.commit_mode == "seed_first" and config.temperature != 0.0:
+            raise ValueError("seed_first currently requires deterministic token temperature=0.")
+        return config
+
     @torch.no_grad()
-    def sample(
-        self,
-        inputs: List[Union[torch.Tensor, List[int]]],
-        config: Optional[EntropyDropSamplerConfig] = None,
-        **kwargs,
-    ) -> Union[BaseSamplerOutput, torch.Tensor]:
-        if config is None:
-            config = EntropyDropSamplerConfig()
-        config = resolve_dependency_guided_config(config, kwargs)
-        
-        steps = kwargs.get("steps", config.steps)
-        max_new_tokens = kwargs.get("max_new_tokens", config.max_new_tokens)
-        max_length = kwargs.get("max_length", config.max_length)
-        block_size = kwargs.get("block_size", config.block_size)
-        temperature = kwargs.get("temperature", config.temperature)
-        cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
-        cfg_keep_tokens = kwargs.get("cfg_keep_tokens", config.cfg_keep_tokens)
-        suppress_tokens = kwargs.get("suppress_tokens", config.suppress_tokens)
-        stochastic_transfer = kwargs.get("stochastic_transfer", config.stochastic_transfer)
-        return_dict = kwargs.get("return_dict", config.return_dict)
-        right_shift_logits = kwargs.get("right_shift_logits", config.right_shift_logits)
-        begin_suppress_tokens = kwargs.get("begin_suppress_tokens", config.begin_suppress_tokens)
-        
-        oracle_candidate_strategy = kwargs.get("oracle_candidate_strategy", config.oracle_candidate_strategy)
-        candidate_chunk_size = kwargs.get(
-            "candidate_chunk_size",
-            config.candidate_chunk_size,
-        )
-        proposal_strategy = config.proposal_strategy
-        cardinality_strategy = config.dependency_cardinality_strategy
-        diagnostic_metadata = config.diagnostic_metadata
-        candidate_selector = kwargs.get(
-            "dependency_candidate_selector",
-            config.dependency_candidate_selector,
-        )
-        available_selectors = ("entropy_drop", *NON_LOOKAHEAD_SELECTORS)
-        if candidate_selector not in available_selectors:
-            raise ValueError(
-                "dependency_candidate_selector must be one of "
-                f"{available_selectors}, got {candidate_selector!r}."
-            )
-        if candidate_selector != "entropy_drop":
-            if proposal_strategy != "dependency":
-                raise ValueError(
-                    "Non-lookahead candidate selection requires "
-                    "proposal_strategy='dependency'."
-                )
-            if cardinality_strategy not in {"scheduler", "entropy_budget"}:
-                raise ValueError(
-                    "Non-lookahead candidate selection requires "
-                    "dependency_cardinality_strategy='scheduler' or "
-                    "'entropy_budget'."
-                )
-            if diagnostic_metadata:
-                raise ValueError(
-                    "Non-lookahead candidate selection currently requires "
-                    "diagnostic_metadata=False."
-                )
-
-        assert 1 <= block_size
-        assert 1 <= steps
-        mask_id = self.tokenizer.mask_token_id
-        bos_id = self.tokenizer.bos_token_id
-        eos_id = self.tokenizer.eos_token_id
-
-        if right_shift_logits:
-            inputs = [[bos_id] if isinstance(p, list) and len(p) == 0 else p for p in inputs]
-        
-        if isinstance(inputs[0], list):
-            inputs = [torch.as_tensor(p, dtype=torch.long, device=self.model.device) for p in inputs]
-        prompt_lens = [p.shape[0] for p in inputs]
-
+    def initialize_state(self, inputs, config=None, **kwargs) -> DecodeState:
+        """Initialize the ordinary decoder without evaluating the model."""
+        config = self._resolve_config(config, **kwargs)
+        if not inputs:
+            raise ValueError("At least one prompt is required.")
+        if config.block_size < 1 or config.steps < 1:
+            raise ValueError("block_size and steps must be positive.")
+        if config.right_shift_logits:
+            inputs = [
+                [self.tokenizer.bos_token_id] if isinstance(p, list) and not p else p
+                for p in inputs
+            ]
+        inputs = [
+            torch.as_tensor(p, dtype=torch.long, device=self.model.device) for p in inputs
+        ]
+        prompt_lens = [len(prompt) for prompt in inputs]
+        max_new_tokens = config.max_new_tokens
         if max_new_tokens:
             max_length = max_new_tokens + max(prompt_lens)
         else:
+            max_length = config.max_length
             max_new_tokens = max_length - max(prompt_lens)
+        if max_new_tokens <= 0:
+            raise ValueError("The response must contain at least one position.")
+        x = torch.full(
+            (len(inputs), max_length), self.tokenizer.eos_token_id,
+            dtype=torch.long, device=self.model.device,
+        )
+        attention_mask = torch.zeros_like(x)
+        response_mask = torch.zeros_like(x, dtype=torch.bool)
+        for row, prompt in enumerate(inputs):
+            start, end = prompt_lens[row], prompt_lens[row] + max_new_tokens
+            x[row, :start] = prompt
+            x[row, start:end] = self.tokenizer.mask_token_id
+            attention_mask[row, :end] = 1
+            response_mask[row, start:end] = True
+        unmasked_index = (x != self.tokenizer.mask_token_id) & attention_mask.bool()
+        if config.cfg_keep_tokens:
+            unmasked_index &= ~torch.isin(
+                x, torch.as_tensor(config.cfg_keep_tokens, device=x.device)
+            )
+        num_blocks = math.ceil(max_new_tokens / config.block_size)
+        return DecodeState(
+            input_ids=x, attention_mask=attention_mask, response_mask=response_mask,
+            unmasked_index=unmasked_index, prompt_lens=prompt_lens,
+            max_new_tokens=max_new_tokens, num_blocks=num_blocks,
+            steps_per_block=math.ceil(config.steps / num_blocks), config=config,
+            rng=RNGState.capture(),
+            histories=[x.clone()] if config.return_dict else None,
+            selected_candidates=[[] for _ in inputs],
+            diagnostics=[[] for _ in inputs] if config.diagnostic_metadata else None,
+        )
 
-        B = len(inputs)
-        T = max_length
-
-        x = torch.full((B, T), eos_id, dtype=torch.long, device=self.model.device)
-        for i, p in enumerate(inputs):
-            x[i, :prompt_lens[i]] = p
-            x[i, prompt_lens[i]:prompt_lens[i] + max_new_tokens] = mask_id
-        
-        attention_mask = torch.zeros((B, T), dtype=torch.long, device=self.model.device)
-        response_mask = torch.zeros((B, T), dtype=torch.bool, device=self.model.device)
-        for i, pl in enumerate(prompt_lens):
-            valid_end = min(pl + max_new_tokens, T)
-            attention_mask[i, :valid_end] = 1
-            response_mask[i, pl:valid_end] = True
-
-        unmasked_index = (x != mask_id) & attention_mask.bool()
-        if cfg_keep_tokens and len(cfg_keep_tokens) > 0:
-            keep_mask = torch.isin(x, torch.as_tensor(cfg_keep_tokens, device=self.model.device))
-            unmasked_index = unmasked_index & ~keep_mask
-
-        # ----- Block scheduling over the appended mask tail -----
-        num_blocks = math.ceil(max_new_tokens / block_size)
-        steps = math.ceil(steps / num_blocks)
-        histories = [x.clone()] if return_dict else None
-        selected_candidates = [[] for _ in range(B)]  # Track candidates per example
-        diagnostics = [[] for _ in range(B)] if diagnostic_metadata else None
-        global_step_index = 0
-
-        for b in range(num_blocks):
-            anchor_state = (
-                initialize_committed_anchor_state(
-                    x,
-                    confidence_threshold=(
-                        config.dependency_anchor_confidence_threshold
-                    ),
+    def _ensure_ready(self, state: DecodeState) -> torch.Tensor | None:
+        """Advance empty schedule entries and initialize block-local anchors."""
+        config = state.config
+        while not state.done:
+            if state.block_span_mask is None:
+                state.step_index = 0
+                state.anchor_state = (
+                    initialize_committed_anchor_state(
+                        state.input_ids,
+                        confidence_threshold=config.dependency_anchor_confidence_threshold,
+                    )
+                    if config.proposal_strategy == "dependency" else None
                 )
-                if proposal_strategy == "dependency"
-                else None
-            )
-            # Build a per-sample mask *within this block* (aligned to each prompt's tail)
-            block_mask_index = torch.zeros(
-                (B, block_size), dtype=torch.bool, device=x.device
-            )
-            block_span_mask = torch.zeros_like(x, dtype=torch.bool)
-
-            for j in range(B):
-                start = prompt_lens[j] + b * block_size
-                end = min(start + block_size, prompt_lens[j] + max_new_tokens, T)
-                if start < end:
-                    width = end - start
-                    block_mask_index[j, :width] = (
-                        x[j, start:end] == mask_id
-                    ) # which positions in this block are still masked
-                    block_span_mask[j, start:end] = True
-
-            if cardinality_strategy in {
-                "marginal_utility",
-                "joint_k",
-                "entropy_budget",
-            }:
-                # Adaptive policies guarantee progress themselves. The initial
-                # mask count is a safe upper bound because every action reveals
-                # at least one position.
-                num_transfer_tokens = None
-                effective_steps = int(block_mask_index.sum(dim=-1).max().item())
+                block_mask = torch.zeros(
+                    (len(state.prompt_lens), config.block_size),
+                    device=state.input_ids.device, dtype=torch.bool,
+                )
+                state.block_span_mask = torch.zeros_like(state.input_ids, dtype=torch.bool)
+                for row, prompt_length in enumerate(state.prompt_lens):
+                    start = prompt_length + state.block_index * config.block_size
+                    end = min(start + config.block_size, prompt_length + state.max_new_tokens)
+                    if start < end:
+                        block_mask[row, :end - start] = (
+                            state.input_ids[row, start:end] == self.tokenizer.mask_token_id
+                        )
+                        state.block_span_mask[row, start:end] = True
+                adaptive = (
+                    config.proposal_strategy == "confidence_threshold"
+                    or config.dependency_cardinality_strategy in {
+                        "marginal_utility", "joint_k", "entropy_budget",
+                    }
+                )
+                if adaptive:
+                    state.num_transfer_tokens = None
+                    state.effective_steps = int(block_mask.sum(-1).max().item())
+                else:
+                    with isolated_rng(state.rng):
+                        state.num_transfer_tokens = get_num_transfer_tokens(
+                            mask_index=block_mask, steps=state.steps_per_block,
+                            scheduler=self.scheduler, stochastic=config.stochastic_transfer,
+                        )
+                        state.rng = RNGState.capture()
+                    state.effective_steps = state.num_transfer_tokens.size(1)
+                    if (
+                        is_fixed_k_strategy(config.proposal_strategy)
+                        and config.dependency_cardinality_strategy == "fixed"
+                    ):
+                        validate_fixed_k_schedule(
+                            state.num_transfer_tokens,
+                            config.dependency_commit_k
+                            if config.proposal_strategy == "dependency" else 1,
+                        )
+            if state.step_index >= state.effective_steps:
+                state.block_index += 1
+                state.block_span_mask = None
+                continue
+            if state.num_transfer_tokens is None:
+                remaining = (
+                    (state.input_ids == self.tokenizer.mask_token_id) & state.block_span_mask
+                ).sum(-1, dtype=torch.long)
+                requested = torch.minimum(
+                    remaining, torch.full_like(remaining, config.dependency_max_action_size)
+                )
             else:
-                num_transfer_tokens = get_num_transfer_tokens(
-                    mask_index=block_mask_index,
-                    steps=steps,
-                    scheduler=self.scheduler,
-                    stochastic=stochastic_transfer,
-                )
-                effective_steps = num_transfer_tokens.size(1)
+                requested = state.num_transfer_tokens[:, state.step_index]
+            if bool(torch.any(requested > 0)):
+                return requested
+            if state.num_transfer_tokens is None:
+                state.step_index = state.effective_steps
+            else:
+                state.step_index += 1
+        return None
+
+    def _prediction_maps(self, logits, config):
+        """Apply the existing token transforms in their original order."""
+        if config.suppress_tokens:
+            for token_id in config.suppress_tokens:
+                logits[:, :, token_id] = -torch.inf
+        if config.right_shift_logits:
+            logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+        predicted = torch.argmax(
+            add_gumbel_noise(logits, temperature=config.temperature), dim=-1
+        )
+        if config.begin_suppress_tokens:
+            for token_id in config.begin_suppress_tokens:
+                logits[:, :, token_id] = -torch.inf
+        probabilities = F.softmax(logits, dim=-1)
+        confidence = probabilities.gather(-1, predicted.unsqueeze(-1)).squeeze(-1)
+        return predicted, probabilities, confidence, self.get_entropy_per_token(logits)
+
+    @torch.no_grad()
+    def prepare_step(
+        self, state: DecodeState, config=None, *, retain_capture: bool = False
+    ) -> PreparedStep | None:
+        """Prepare one immutable decision; repeated calls replay its RNG."""
+        if config is not None:
+            config = self._resolve_config(config)
             if (
-                is_fixed_k_strategy(proposal_strategy)
-                and cardinality_strategy == "fixed"
+                config.block_size != state.config.block_size
+                or config.steps != state.config.steps
             ):
-                validate_fixed_k_schedule(
-                    num_transfer_tokens,
-                    (
-                        config.dependency_commit_k
-                        if proposal_strategy == "dependency"
-                        else 1
-                    ),
-                )
-
-            # ----- Iterative reveal inside the current block -----
-            for i in range(effective_steps):
-                if num_transfer_tokens is None:
-                    remaining_by_row = (
-                        (x == mask_id) & block_span_mask
-                    ).sum(dim=-1, dtype=torch.long)
-                    num_transfer = torch.minimum(
-                        remaining_by_row,
-                        torch.full_like(
-                            remaining_by_row,
-                            config.dependency_max_action_size,
-                        ),
-                    )
-                else:
-                    num_transfer = num_transfer_tokens[:, i]
-                if torch.all(num_transfer == 0):
-                    if num_transfer_tokens is None:
-                        break
-                    continue
-
-                mask_index = x == mask_id # current global mask map
-                current_block_mask = mask_index & block_span_mask # current mask map restricted to this block
-
-                unconditional_ids = None
-                if cfg_scale > 0.0:
-                    unconditional_ids = x.clone()
-                    unconditional_ids[unmasked_index] = mask_id
-                base_forward = run_base_forward_with_cfg_inputs(
-                    self.model,
-                    x,
-                    attention_mask,
-                    cfg_scale=cfg_scale,
-                    unconditional_input_ids=unconditional_ids,
-                    capture_dependency=proposal_strategy == "dependency",
-                    dependency_last_n_layers=config.dependency_last_n_layers,
-                    measure_timing=diagnostic_metadata,
-                )
-                logits = base_forward.logits
-
-                if suppress_tokens is not None and len(suppress_tokens) > 0:
-                    for token_id in suppress_tokens:
-                        logits[:, :, token_id] = -torch.inf
-                
-                if right_shift_logits:
-                    logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
-                
-                # Argmax decoding with optional Gumbel-Max noise for exploration
-                logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-                x0 = torch.argmax(
-                    logits_with_noise, dim=-1
-                )  # [B, T] predicted token ids
-
-                if begin_suppress_tokens is not None and len(begin_suppress_tokens) > 0:
-                    for token_id in begin_suppress_tokens:
-                        logits[:, :, token_id] = -torch.inf
-                
-                p = F.softmax(logits, dim=-1)
-                x0_p = torch.squeeze(torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)
-                confidence = torch.where(current_block_mask, x0_p, -np.inf)
-
-                base_entropy_map = self.get_entropy_per_token(logits)
-                if proposal_strategy == "legacy":
-                    candidates = self.generate_candidate_sets(
-                        confidence=confidence,
-                        mask_idx=current_block_mask,
-                        num_transfer=num_transfer,
-                        strategy=oracle_candidate_strategy,
-                    )
-                    best_c_idx, _, best_candidate_names = self._select_best_candidate(
-                        x=x,
-                        x0=x0,
-                        mask_index=mask_index,
-                        candidates=candidates,
-                        attention_mask=attention_mask,
-                        base_entropy_map=base_entropy_map,
-                        candidate_chunk_size=candidate_chunk_size,
-                    )
-                else:
-                    active_rows = num_transfer > 0
-                    proposal_mask = current_block_mask & active_rows[:, None]
-                    step_seed = config.dependency_generation_seed + global_step_index
-                    if candidate_selector == "entropy_drop":
-                        selection = select_fixed_k_candidate(
-                            self.model,
-                            x,
-                            x0,
-                            base_forward=base_forward,
-                            base_metric_map=base_entropy_map,
-                            entropy_map=base_entropy_map,
-                            confidence=x0_p,
-                            metric="entropy_drop",
-                            active_mask=proposal_mask,
-                            requested_k=num_transfer,
-                            anchor_state=anchor_state,
-                            masked_active_mask=mask_index,
-                            response_mask=response_mask,
-                            attention_mask=attention_mask,
-                            config=config,
-                            generation_seed=step_seed,
-                        )
-                        best_c_idx = selection.lookahead.best_mask
-                        best_candidate_names = [
-                            name or "" for name in selection.lookahead.best_names
-                        ]
-                    else:
-                        candidates, _, _, _ = build_dependency_candidates(
-                            base_forward,
-                            active_mask=proposal_mask,
-                            requested_k=num_transfer,
-                            anchor_state=anchor_state,
-                            response_mask=response_mask,
-                            attention_mask=attention_mask,
-                            entropy_map=base_entropy_map,
-                            confidence=x0_p,
-                            config=config,
-                            generation_seed=step_seed,
-                        )
-                        captures_released = release_dependency_capture_tensors(
-                            base_forward
-                        )
-                        if base_forward.capture_active_after_forward:
-                            raise RuntimeError(
-                                "Candidate selection cannot start while dependency "
-                                "capture is active."
-                            )
-                        if not captures_released:
-                            raise RuntimeError(
-                                "Captured Q/K tensors remained live after candidate "
-                                "generation."
-                            )
-                        top2_margin = (
-                            top2_probability_margin(p)
-                            if candidate_selector == "min_top2_margin"
-                            else None
-                        )
-                        simple_selection = select_candidates_without_lookahead(
-                            candidates,
-                            confidence=x0_p,
-                            entropy=base_entropy_map,
-                            top2_margin=top2_margin,
-                            selector=candidate_selector,
-                        )
-                        best_c_idx = simple_selection.best_mask
-                        best_candidate_names = [
-                            name or "" for name in simple_selection.best_names
-                        ]
-                        selection = None
-                    anchor_state_before = anchor_state
-                    if anchor_state is not None:
-                        anchor_state_after = record_committed_anchors(
-                            anchor_state,
-                            best_c_idx,
-                            x0_p,
-                            x0,
-                            commit_step=global_step_index,
-                        )
-                    else:
-                        anchor_state_after = None
-                    if diagnostics is not None:
-                        if selection is None:
-                            raise RuntimeError(
-                                "Lookahead diagnostics require an entropy-drop "
-                                "selection result."
-                            )
-                        step_diagnostics = build_step_diagnostics(
-                            selection,
-                            base_forward,
-                            config=config,
-                            metric="entropy_drop",
-                            masked_active_mask=mask_index,
-                            response_mask=response_mask,
-                            block_index=b,
-                            step_index=i,
-                            global_step_index=global_step_index,
-                            generation_seed=step_seed,
-                            base_metric_map=base_entropy_map,
-                            predicted_token_ids=x0,
-                            anchor_state_before=anchor_state_before,
-                            anchor_state_after=anchor_state_after,
-                        )
-                        for batch_index, record in enumerate(step_diagnostics):
-                            diagnostics[batch_index].append(record)
-                    anchor_state = anchor_state_after
-                
-                # Track selected candidates per example
-                for b in range(B):
-                    if best_candidate_names[b]:  # Only add if non-empty
-                        if best_candidate_names[b] not in selected_candidates[b]:
-                            selected_candidates[b].append(best_candidate_names[b])
-                
-                # Apply the best candidate
-                x[best_c_idx] = x0[best_c_idx]
-
-                if return_dict:
-                    histories.append(x.clone())
-                global_step_index += 1
-        
-        if return_dict:
-            return BaseSamplerOutput(
-                sequences=x,
-                histories=histories,
-                selected_candidates=selected_candidates,
-                diagnostics=diagnostics,
+                raise ValueError("A resumed state cannot change its block geometry or schedule.")
+            state.config = config
+        config = state.config
+        requested = self._ensure_ready(state)
+        if requested is None:
+            return None
+        x = state.input_ids
+        masked = x == self.tokenizer.mask_token_id
+        active = masked & state.block_span_mask & (requested > 0)[:, None]
+        step_seed = config.dependency_generation_seed + state.global_step_index
+        with isolated_rng(state.rng):
+            unconditional = None
+            if config.cfg_scale > 0:
+                unconditional = x.clone()
+                unconditional[state.unmasked_index] = self.tokenizer.mask_token_id
+            base = run_base_forward_with_cfg_inputs(
+                self.model, x, state.attention_mask, cfg_scale=config.cfg_scale,
+                unconditional_input_ids=unconditional,
+                capture_dependency=dependency_capture_required(config),
+                dependency_last_n_layers=config.dependency_last_n_layers,
+                measure_timing=config.diagnostic_metadata,
             )
-        return x
+            predicted, probabilities, confidence, entropy = self._prediction_maps(
+                base.logits, config
+            )
+            kwargs = dict(
+                active_mask=active, requested_k=requested, anchor_state=state.anchor_state,
+                response_mask=state.response_mask, attention_mask=state.attention_mask,
+                entropy_map=entropy, confidence=confidence, config=config,
+                generation_seed=step_seed,
+            )
+            if config.proposal_strategy == "dependency":
+                candidates, dependency, reconstruction_seconds, proposal_seconds = (
+                    build_dependency_candidates(base, **kwargs)
+                )
+            elif config.proposal_strategy == "confidence_threshold":
+                candidates, dependency, reconstruction_seconds, proposal_seconds = (
+                    build_confidence_threshold_candidates(base, **kwargs)
+                )
+            else:
+                dependency, reconstruction_seconds = None, 0.0
+                started = time.perf_counter()
+                if config.proposal_strategy == "legacy":
+                    mappings = self.generate_candidate_sets(
+                        confidence=torch.where(active, confidence, -torch.inf),
+                        mask_idx=active, num_transfer=requested,
+                        strategy=config.oracle_candidate_strategy,
+                    )
+                    candidates = candidate_batch_from_mask_mapping(mappings, eligible_mask=masked)
+                else:
+                    candidates = _build_baseline_candidates(
+                        config.proposal_strategy, active_mask=active, confidence=confidence,
+                        config=config, generation_seed=step_seed,
+                    )
+                proposal_seconds = time.perf_counter() - started
+            rng_after = RNGState.capture()
+        if not retain_capture:
+            release_dependency_capture_tensors(base)
+        return PreparedStep(
+            state=state.clone(include_history=False), config=config, base_forward=base,
+            x0=predicted, confidence=confidence, entropy=entropy,
+            top2_margin=(
+                top2_probability_margin(probabilities)
+                if retain_capture or config.dependency_candidate_selector == "min_top2_margin"
+                else None
+            ), probabilities=probabilities,
+            candidates=candidates, dependency=dependency, active_mask=active,
+            masked_active_mask=masked, requested_k=requested, step_seed=step_seed,
+            reconstruction_seconds=reconstruction_seconds, proposal_seconds=proposal_seconds,
+            rng_after=rng_after,
+        )
+
+    @torch.no_grad()
+    def select_step(self, prepared: PreparedStep, selector=None) -> StepSelection:
+        """Select from the frozen pool, caching each selector's result."""
+        config = prepared.config
+        selector = selector or config.dependency_candidate_selector
+        if config.proposal_strategy == "confidence_threshold":
+            selector = "direct"
+        if selector in prepared.selections:
+            return prepared.selections[selector]
+        release_dependency_capture_tensors(prepared.base_forward)
+        if selector == "entropy_drop":
+            _synchronize_for_timing(prepared.x0, config.diagnostic_metadata)
+            started = time.perf_counter()
+            with isolated_rng(prepared.rng_after):
+                raw = evaluate_batched_lookahead(
+                    self.model, prepared.state.input_ids, prepared.x0, prepared.candidates,
+                    base_metric_map=prepared.entropy, metric="entropy_drop",
+                    attention_mask=prepared.state.attention_mask,
+                    masked_active_mask=prepared.masked_active_mask,
+                    candidate_chunk_size=config.candidate_chunk_size,
+                )
+            size = apply_size_aware_scoring(
+                raw, prepared.candidates, prepared.entropy,
+                rule="raw" if config.proposal_strategy == "legacy" else config.dependency_size_scoring,
+                immediate_cost_weight=config.dependency_immediate_cost_weight,
+                size_penalty=config.dependency_size_penalty,
+            )
+            _synchronize_for_timing(prepared.x0, config.diagnostic_metadata)
+            detail = FixedKSelectionOutput(
+                candidates=prepared.candidates, lookahead=size.lookahead,
+                dependency=prepared.dependency,
+                attention_reconstruction_seconds=prepared.reconstruction_seconds,
+                proposal_generation_seconds=prepared.proposal_seconds,
+                candidate_lookahead_seconds=time.perf_counter() - started,
+                raw_lookahead_scores=size.raw_scores,
+                immediate_action_costs=size.immediate_costs,
+                size_scoring_rule=size.rule,
+            )
+            winner = size.lookahead
+            result = StepSelection(
+                selector, winner.best_mask, winner.best_index, winner.best_names,
+                winner.scores, detail,
+            )
+        else:
+            if selector == "min_top2_margin" and prepared.top2_margin is None:
+                prepared.top2_margin = top2_probability_margin(prepared.probabilities)
+            detail = select_candidates_without_lookahead(
+                prepared.candidates, confidence=prepared.confidence,
+                entropy=prepared.entropy, top2_margin=prepared.top2_margin,
+                selector="max_confidence" if selector == "direct" else selector,
+            )
+            result = StepSelection(
+                selector, detail.best_mask, detail.best_index, detail.best_names,
+                detail.selection_scores, detail,
+            )
+        prepared.selections[selector] = result
+        return result
+
+    @torch.no_grad()
+    def probe_seed_first(
+        self, prepared: PreparedStep, candidate_index, *, reverse: bool = False
+    ) -> CommitValues:
+        """Reveal only the recorded seed, refresh masked companions, and restore RNG."""
+        if prepared.config.temperature != 0.0:
+            raise ValueError("Seed-precedence probes require temperature=0.")
+        release_dependency_capture_tensors(prepared.base_forward)
+        candidates = prepared.candidates
+        batch_size = prepared.x0.shape[0]
+        indexes = torch.as_tensor(
+            candidate_index, device=prepared.x0.device, dtype=torch.long
+        ).flatten()
+        if indexes.numel() == 1:
+            indexes = indexes.expand(batch_size)
+        if indexes.numel() != batch_size:
+            raise ValueError("candidate_index must be scalar or have one entry per row.")
+        first = torch.full((batch_size,), -1, device=prepared.x0.device, dtype=torch.long)
+        action_mask = torch.zeros_like(prepared.x0, dtype=torch.bool)
+        for row, index in enumerate(indexes.tolist()):
+            if index < 0:
+                continue
+            if not bool(candidates.candidate_valid[index, row]):
+                raise ValueError("Cannot probe an invalid candidate.")
+            action_mask[row] = candidates.candidate_masks[index, row]
+            seed = int(candidates.seed_anchors[index, row].item())
+            if seed < 0 or not bool(action_mask[row, seed]):
+                raise ValueError("Seed precedence requires a recorded seed inside the action.")
+            if reverse:
+                positions = torch.where(action_mask[row])[0]
+                if positions.numel() != 2:
+                    raise ValueError("Reverse-order probes require two-token actions.")
+                seed = int(positions[positions != seed][0].item())
+            first[row] = seed
+        companions = action_mask.clone()
+        revealed = prepared.state.input_ids.clone()
+        for row, seed in enumerate(first.tolist()):
+            if seed >= 0:
+                revealed[row, seed] = prepared.x0[row, seed]
+                companions[row, seed] = False
+        if not bool(torch.any(companions)):
+            return CommitValues(
+                prepared.x0.clone(), prepared.confidence.clone(), first, companions,
+                torch.zeros_like(companions), prepared.confidence.clone(),
+                prepared.probabilities, prepared.x0.clone(),
+            )
+        with isolated_rng(prepared.rng_after):
+            unconditional = None
+            if prepared.config.cfg_scale > 0:
+                unconditional = revealed.clone()
+                unconditional[prepared.state.unmasked_index] = self.tokenizer.mask_token_id
+            refreshed = run_base_forward_with_cfg_inputs(
+                self.model, revealed, prepared.state.attention_mask,
+                cfg_scale=prepared.config.cfg_scale,
+                unconditional_input_ids=unconditional, capture_dependency=False,
+                dependency_last_n_layers=prepared.config.dependency_last_n_layers,
+                measure_timing=prepared.config.diagnostic_metadata,
+            )
+            ids, probabilities, confidence, _ = self._prediction_maps(
+                refreshed.logits, prepared.config
+            )
+        token_ids = torch.where(companions, ids, prepared.x0)
+        committed_confidence = torch.where(companions, confidence, prepared.confidence)
+        original_probability = probabilities.gather(-1, prepared.x0.unsqueeze(-1)).squeeze(-1)
+        return CommitValues(
+            token_ids, committed_confidence, first, companions,
+            companions & (token_ids != prepared.x0), original_probability, probabilities,
+            ids,
+        )
+
+    def _generic_diagnostics(self, state, prepared, selection, action_mask, token_ids):
+        """Emit selector-independent records without inventing lookahead evidence."""
+        records = []
+        for row in range(state.input_ids.shape[0]):
+            candidates = []
+            for index, name in enumerate(prepared.candidates.names):
+                valid = bool(prepared.candidates.candidate_valid[index, row])
+                positions = torch.where(prepared.candidates.candidate_masks[index, row])[0]
+                score = (
+                    float(selection.scores[index, row].item())
+                    if selection is not None and valid else None
+                )
+                candidates.append({
+                    "name": name, "valid": valid, "positions": positions.tolist(),
+                    "action_size": int(positions.numel()),
+                    "seed_position": int(prepared.candidates.seed_anchors[index, row]),
+                    "token_ids": prepared.x0[row, positions].tolist(),
+                    "selection_score": score,
+                    "mean_within_set_conflict": float(
+                        prepared.candidates.mean_within_set_dependency[index, row]
+                    ) if valid else None,
+                })
+            positions = torch.where(action_mask[row])[0]
+            selected = None
+            if selection is not None and int(selection.best_index[row]) >= 0:
+                selected = dict(candidates[int(selection.best_index[row])])
+                selected["token_ids"] = token_ids[row, positions].tolist()
+            records.append({
+                "block_index": state.block_index, "step_index": state.step_index,
+                "global_step_index": state.global_step_index,
+                "generation_seed": prepared.step_seed,
+                "candidate_selector": selection.selector if selection else "forced",
+                "verifier_metric": None, "lookahead_model_calls": 0,
+                "captured_base_forward_count": prepared.base_forward.captured_base_forward_count,
+                "candidate_count_realized": sum(item["valid"] for item in candidates),
+                "commit_k": int(positions.numel()), "candidates": candidates,
+                "selected_candidate": selected,
+                "dependency_seed_strategy": prepared.config.dependency_seed_strategy,
+                "base_forward_seconds": prepared.base_forward.base_forward_seconds,
+                "attention_reconstruction_seconds": prepared.reconstruction_seconds,
+                "proposal_generation_seconds": prepared.proposal_seconds,
+                "candidate_lookahead_seconds": 0.0,
+            })
+        return records
+
+    @torch.no_grad()
+    def commit_step(
+        self, state: DecodeState, prepared: PreparedStep, action_mask, *,
+        token_ids=None, confidence=None, selection: StepSelection | None = None,
+    ) -> DecodeState:
+        """Commit one macro-action in place; defaults freeze base anchor confidence."""
+        if (
+            state.step_index != prepared.state.step_index
+            or state.global_step_index != prepared.state.global_step_index
+            or state.block_index != prepared.state.block_index
+            or not torch.equal(state.input_ids, prepared.state.input_ids)
+        ):
+            raise ValueError("A prepared action can only commit to its original frozen state.")
+        if action_mask.shape != state.input_ids.shape or action_mask.dtype != torch.bool:
+            raise ValueError("action_mask must be a boolean tensor matching the state.")
+        if bool(torch.any(action_mask & ~prepared.active_mask)):
+            raise ValueError("An action may only reveal currently eligible positions.")
+        if bool(torch.any((prepared.requested_k > 0) & ~action_mask.any(-1))):
+            raise ValueError("Every active row must make progress.")
+        token_ids = prepared.x0 if token_ids is None else token_ids
+        confidence = prepared.confidence if confidence is None else confidence
+        if token_ids.shape != state.input_ids.shape or confidence.shape != state.input_ids.shape:
+            raise ValueError("Commit values must match the state shape.")
+        before = state.anchor_state
+        after = (
+            record_committed_anchors(
+                before, action_mask, confidence, token_ids,
+                commit_step=state.global_step_index,
+            )
+            if before is not None else None
+        )
+        if state.diagnostics is not None:
+            if selection is not None and isinstance(selection.detail, FixedKSelectionOutput):
+                records = build_step_diagnostics(
+                    selection.detail, prepared.base_forward, config=prepared.config,
+                    metric="entropy_drop", masked_active_mask=prepared.masked_active_mask,
+                    response_mask=state.response_mask, block_index=state.block_index,
+                    step_index=state.step_index, global_step_index=state.global_step_index,
+                    generation_seed=prepared.step_seed, base_metric_map=prepared.entropy,
+                    predicted_token_ids=prepared.x0, anchor_state_before=before,
+                    anchor_state_after=after,
+                )
+            else:
+                records = self._generic_diagnostics(
+                    state, prepared, selection, action_mask, token_ids
+                )
+            for row, record in enumerate(records):
+                positions = torch.where(action_mask[row])[0]
+                record["committed_token_ids"] = token_ids[row, positions].tolist()
+                selected_record = record.get("selected_candidate")
+                if selected_record is not None:
+                    selected_record["pre_reveal_token_ids"] = prepared.x0[row, positions].tolist()
+                    selected_record["token_ids"] = record["committed_token_ids"]
+                record["commit_mode"] = state.config.commit_mode
+                record["committed_value_changes"] = int(
+                    (token_ids[row, positions] != prepared.x0[row, positions]).sum().item()
+                )
+                state.diagnostics[row].append(record)
+        state.anchor_state = after
+        state.input_ids[action_mask] = token_ids[action_mask]
+        if selection is not None:
+            for row, name in enumerate(selection.best_names):
+                if name and name not in state.selected_candidates[row]:
+                    state.selected_candidates[row].append(name)
+        if state.histories is not None:
+            state.histories.append(state.input_ids.clone())
+        state.rng = prepared.rng_after
+        state.step_index += 1
+        state.global_step_index += 1
+        return state
+
+    @torch.no_grad()
+    def continue_from_state(self, state: DecodeState, config=None, *, observer=None):
+        """Finish a saved state through the same prepare/select/commit implementation."""
+        if config is not None:
+            config = self._resolve_config(config)
+            if config.block_size != state.config.block_size or config.steps != state.config.steps:
+                raise ValueError("Continuation cannot change block geometry or schedule.")
+            state.config = config
+        while True:
+            prepared = self.prepare_step(state, retain_capture=observer is not None)
+            if prepared is None:
+                break
+            if observer is not None:
+                with isolated_rng():
+                    observer(prepared)
+            release_dependency_capture_tensors(prepared.base_forward)
+            selection = self.select_step(prepared)
+            token_ids, confidence = None, None
+            if state.config.commit_mode == "seed_first":
+                values = self.probe_seed_first(prepared, selection.best_index)
+                token_ids, confidence = values.token_ids, values.confidence
+            self.commit_step(
+                state, prepared, selection.best_mask, token_ids=token_ids,
+                confidence=confidence, selection=selection,
+            )
+        return BaseSamplerOutput(
+            sequences=state.input_ids, histories=state.histories,
+            selected_candidates=state.selected_candidates, diagnostics=state.diagnostics,
+        )
+
+    @torch.no_grad()
+    def sample(
+        self, inputs: List[Union[torch.Tensor, List[int]]],
+        config: Optional[EntropyDropSamplerConfig] = None, **kwargs,
+    ) -> Union[BaseSamplerOutput, torch.Tensor]:
+        """Run the ordinary decoder using replayable state transitions."""
+        observer = kwargs.pop("observer", None)
+        state = self.initialize_state(inputs, config=config, **kwargs)
+        output = self.continue_from_state(state, observer=observer)
+        # Preserve the ordinary sampler's external RNG-consumption semantics.
+        state.rng.restore()
+        return output if state.config.return_dict else output.sequences

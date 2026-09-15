@@ -149,6 +149,10 @@ def test_selected_key_renormalization_is_explicit():
     assert torch.equal(preserved_mass.directed, torch.full((1, 2, 2), 0.25))
     assert renormalized.renormalized_selected_keys
     assert not preserved_mass.renormalized_selected_keys
+    assert torch.equal(preserved_mass.attention_mass_by_region["prompt"], torch.full((1, 2), .5))
+    assert torch.equal(preserved_mass.attention_mass_by_region["selected_response"], torch.full((1, 2), .5))
+    assert torch.count_nonzero(preserved_mass.attention_mass_by_region["other_response"]) == 0
+    assert torch.equal(preserved_mass.attention_mass_by_region["self"], torch.full((1, 2), .25))
 
 
 def test_diagonal_zeroing_preserves_absolute_position_mappings():

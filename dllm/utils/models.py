@@ -1,3 +1,10 @@
+"""Load diffusion models and tokenizers with optional explicit device placement.
+
+Use through the pipeline evaluation entrypoints. On a compute node, source
+~/.zshrc, activate the dllm environment, and check device routing with:
+    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_eval_device_routing.py
+"""
+
 from types import SimpleNamespace
 
 import accelerate
@@ -37,13 +44,17 @@ def get_model(
         "attn_implementation", getattr(model_args, "attn_implementation", None)
     )
 
-    # Device map: skip when ZeRO-3
-    device_map = (
-        {"": accelerate.PartialState().local_process_index}
-        if not transformers.modeling_utils.is_deepspeed_zero3_enabled()
-        and torch.cuda.is_available()
-        else None
-    )
+    # Independent workers can request a GPU before loading any weights. Preserve
+    # the existing local-rank default for distributed callers and skip maps with
+    # ZeRO-3, which manages placement itself.
+    if transformers.modeling_utils.is_deepspeed_zero3_enabled():
+        device_map = None
+    elif "device_map" in kwargs:
+        device_map = kwargs["device_map"]
+    elif torch.cuda.is_available():
+        device_map = {"": accelerate.PartialState().local_process_index}
+    else:
+        device_map = None
 
     quant_config = None
     if load_in_4bit and transformers.utils.is_bitsandbytes_available():
@@ -66,6 +77,11 @@ def get_model(
         model = transformers.AutoModelForMaskedLM.from_pretrained(
             model_name_or_path, **params
         )
+    except (torch.OutOfMemoryError, MemoryError):
+        # An allocation failure is not an unsupported model-class error.
+        # Retrying via AutoModel can hold the first load's partial allocations
+        # in its traceback while allocating a second copy of the same weights.
+        raise
     except Exception:
         model = transformers.AutoModel.from_pretrained(model_name_or_path, **params)
 

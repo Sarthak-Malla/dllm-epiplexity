@@ -1,0 +1,12 @@
+{
+  "task": "humaneval_instruct_llada",
+  "num_fewshot": 0,
+  "primary_metric": "pass@1",
+  "primary_filter": "create_test",
+  "generation": {
+    "max_new_tokens": 512, "block_size": 512, "steps": 512,
+    "suppress_tokens": [126081], "begin_suppress_tokens": []
+  },
+  "apply_chat_template": true,
+  "confirm_run_unsafe_code": true
+}

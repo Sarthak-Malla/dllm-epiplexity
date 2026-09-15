@@ -817,6 +817,7 @@ def generate_parallel_dependency_candidates(
             records.append(
                 {
                     "positions": canonical,
+                    "construction_order": tuple(selected),
                     "seed": seed,
                     "score": score,
                     "mean_conflict": mean_conflict,
@@ -862,6 +863,9 @@ def generate_parallel_dependency_candidates(
                 records.append(
                     {
                         "positions": canonical,
+                        # Refills have a ranked bookkeeping order, rather than
+                        # another greedy seed-and-companion construction.
+                        "construction_order": tuple(ranked_subset),
                         "seed": int(ranked_subset[0]),
                         "score": _subset_objective(
                             list(ranked_subset),
@@ -979,6 +983,16 @@ def generate_parallel_dependency_candidates(
                 ),
                 "seed_rank_by_batch": tuple(
                     record["seed_rank"] if record is not None else None
+                    for record in records
+                ),
+                "construction_order_by_batch": tuple(
+                    record["construction_order"] if record is not None else None
+                    for record in records
+                ),
+                "construction_order_position_space": "compact_active_response",
+                "construction_order_kind_by_batch": tuple(
+                    ("ranked_refill" if record["fallback_source"] == "dependency_ranked_combination_refill"
+                     else "greedy") if record is not None else None
                     for record in records
                 ),
             }

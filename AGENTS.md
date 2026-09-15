@@ -10,3 +10,4 @@
 - For tasks requiring a GPU, use the following command: `srun -p $PARTITION --quotatype=$QUOTATYPE --gres=gpu:1 --cpus-per-task=24 --time=03:00:00 python ...`.
 - Never use CUDA_VISIBLE_DEVICES
 - Never run scripts on the login node. When running scripts on a compute node, give me the command and never run it yourself.
+- "--quotatype" does not work with slurm, so use "-q" instead. For example, use `srun -p $PARTITION -q $QUOTATYPE --gres=gpu:1 --cpus-per-task=24 --time=03:00:00 python ...`.

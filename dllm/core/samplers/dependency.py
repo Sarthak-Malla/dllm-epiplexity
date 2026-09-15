@@ -74,6 +74,7 @@ class DependencyCaptureOutput:
     renormalized_selected_keys: bool
     diagonal_zeroed: bool
     sink_mask: torch.Tensor | None = None
+    attention_mass_by_region: dict[str, torch.Tensor] | None = None
 
 
 @dataclass(frozen=True)
@@ -789,6 +790,7 @@ def build_active_dependency_matrix(
     attention_bias: torch.Tensor | None = None,
     zero_diagonal: bool = True,
     renormalize_selected_keys: bool = True,
+    region_masks: dict[str, torch.Tensor] | None = None,
 ) -> DependencyCaptureOutput:
     """Aggregate selected-layer attention over active response positions."""
     if not isinstance(structure, LLaDAAttentionStructure):
@@ -831,6 +833,14 @@ def build_active_dependency_matrix(
         )
         normalized_attention_mask = valid_tokens
 
+    extra_regions = {}
+    for name, region in (region_masks or {}).items():
+        if name in {"prompt", "selected_response", "other_response", "self"}:
+            raise ValueError(f"Attention region name {name!r} is reserved.")
+        extra_regions[name] = _validate_selection_mask(
+            region, name=f"region_masks[{name}]", batch_size=batch_size,
+            sequence_length=sequence_length, device=device,
+        ) & valid_tokens
     eligible = active & response & valid_tokens
     positions_by_batch = tuple(
         torch.nonzero(row, as_tuple=False).flatten() for row in eligible
@@ -857,6 +867,11 @@ def build_active_dependency_matrix(
         dtype=torch.bool,
     )
     key_valid_mask = query_valid_mask.clone()
+    mass_by_region = (
+        {name: torch.zeros((batch_size, maximum_active), device=device, dtype=torch.float32)
+         for name in ("prompt", "selected_response", "other_response", "self", *extra_regions)}
+        if not renormalize_selected_keys else None
+    )
 
     for batch_index, positions in enumerate(positions_by_batch):
         active_count = positions.numel()
@@ -895,6 +910,21 @@ def build_active_dependency_matrix(
             )
             probabilities = reconstructed.probabilities
             if not renormalize_selected_keys:
+                full_probabilities = probabilities.mean(dim=1).squeeze(0)
+                regions = {
+                    "prompt": valid_tokens[batch_index] & ~response[batch_index],
+                    "selected_response": eligible[batch_index],
+                    "other_response": valid_tokens[batch_index] & response[batch_index] & ~eligible[batch_index],
+                }
+                regions.update({name: region[batch_index] for name, region in extra_regions.items()})
+                for name, region in regions.items():
+                    mass_by_region[name][batch_index, :active_count].add_(
+                        full_probabilities[:, region].sum(dim=-1) / len(structure.selected_layers)
+                    )
+                mass_by_region["self"][batch_index, :active_count].add_(
+                    full_probabilities.gather(1, positions[:, None]).squeeze(-1)
+                    / len(structure.selected_layers)
+                )
                 probabilities = probabilities.index_select(-1, positions)
             layer_sum.add_(probabilities.mean(dim=1).squeeze(0))
 
@@ -921,6 +951,7 @@ def build_active_dependency_matrix(
         layer_ids=structure.layer_ids,
         renormalized_selected_keys=renormalize_selected_keys,
         diagonal_zeroed=zero_diagonal,
+        attention_mass_by_region=mass_by_region,
     )
 
 
@@ -1025,6 +1056,7 @@ def filter_dependency_sinks(
     sink_quantile: float | None = 0.99,
     sink_threshold: float | None = None,
     renormalize_rows: bool = True,
+    sink_reference: DependencyCaptureOutput | None = None,
 ) -> DependencyCaptureOutput:
     """Zero detected sink columns and safely renormalize valid dependency rows."""
     if not isinstance(enabled, bool):
@@ -1035,8 +1067,13 @@ def filter_dependency_sinks(
         return output
 
     _validate_dependency_output(output)
+    if sink_reference is not None:
+        _validate_dependency_output(sink_reference)
+        for name in ("query_positions", "key_positions", "query_valid_mask", "key_valid_mask"):
+            if not torch.equal(getattr(output, name), getattr(sink_reference, name)):
+                raise ValueError("sink_reference must use the same selected positions and masks.")
     sink_mask = detect_dependency_sinks(
-        output,
+        output if sink_reference is None else sink_reference,
         sink_quantile=sink_quantile,
         sink_threshold=sink_threshold,
     )

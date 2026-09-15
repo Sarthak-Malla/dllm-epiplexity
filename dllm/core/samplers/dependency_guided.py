@@ -70,6 +70,7 @@ BASELINE_PROPOSAL_STRATEGIES = (
 SUPPORTED_PROPOSAL_STRATEGIES = (
     "legacy",
     PROPOSED_PROPOSAL_STRATEGY,
+    "confidence_threshold",
     *BASELINE_PROPOSAL_STRATEGIES,
 )
 SUPPORTED_DEPENDENCY_FALLBACKS = ("dependency_only",)
@@ -113,6 +114,11 @@ class DependencyGuidedSamplerConfig(MDLMSamplerConfig):
     dependency_size_penalty: float = 0.0
     candidate_chunk_size: int | None = None
     diagnostic_metadata: bool = False
+    confidence_threshold: float = 0.9
+    confidence_ranking: str = "confidence"
+    commit_mode: str = "simultaneous"
+    dependency_preserve_attention_mass: bool = False
+    dependency_budget_search: str = "first_unaffordable"
 
 
 @dataclass(frozen=True)
@@ -215,7 +221,7 @@ def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> 
         raise ValueError(
             "dependency_action_sizes cannot exceed dependency_max_action_size."
         )
-    if config.dependency_cardinality_strategy != "fixed":
+    if config.dependency_cardinality_strategy != "fixed" and config.proposal_strategy != "confidence_threshold":
         if config.proposal_strategy != PROPOSED_PROPOSAL_STRATEGY:
             raise ValueError(
                 "Adaptive cardinality requires proposal_strategy='dependency'."
@@ -231,6 +237,22 @@ def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> 
         raise ValueError(
             "Variable-size adaptive candidates require explicit size-aware scoring."
         )
+    if config.confidence_ranking not in {"confidence", "incoming"}:
+        raise ValueError("confidence_ranking must be confidence or incoming.")
+    if config.commit_mode not in {"simultaneous", "seed_first"}:
+        raise ValueError("commit_mode must be simultaneous or seed_first.")
+    if not isinstance(config.dependency_preserve_attention_mass, bool):
+        raise TypeError("dependency_preserve_attention_mass must be boolean.")
+    if config.dependency_budget_search not in {"first_unaffordable", "best_affordable"}:
+        raise ValueError("dependency_budget_search must be first_unaffordable or best_affordable.")
+    if config.dependency_budget_search == "best_affordable" and (
+        config.proposal_strategy != "dependency"
+        or config.dependency_cardinality_strategy != "entropy_budget"
+    ):
+        raise ValueError("best_affordable requires dependency entropy_budget construction.")
+    threshold = config.confidence_threshold
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("confidence_threshold must be finite and in [0,1].")
     if config.dependency_conflict_normalization not in CONFLICT_NORMALIZATIONS:
         raise ValueError(
             "Unknown dependency_conflict_normalization "
@@ -565,6 +587,146 @@ def remap_compact_candidates_to_sequence(
     )
 
 
+def dependency_capture_required(config: DependencyGuidedSamplerConfig) -> bool:
+    """Whether this proposal uses Q/K captures from the ordinary base pass."""
+    return config.proposal_strategy == "dependency" or (
+        config.proposal_strategy == "confidence_threshold"
+        and config.confidence_ranking == "incoming"
+    )
+
+
+def reconstruct_dependency_for_proposals(
+    base_forward: DependencyBaseForwardOutput,
+    *,
+    active_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    attention_mask: torch.Tensor,
+    config: DependencyGuidedSamplerConfig,
+    region_masks: dict[str, torch.Tensor] | None = None,
+) -> DependencyCaptureOutput:
+    """Build the selected dependency view, retaining reference sink identities."""
+    if base_forward.structure is None or base_forward.captures is None:
+        raise RuntimeError("Dependency proposal requested without base-forward capture.")
+    common = dict(
+        active_mask=active_mask,
+        response_mask=response_mask,
+        attention_mask=attention_mask,
+        zero_diagonal=config.dependency_zero_diagonal,
+        region_masks=region_masks,
+    )
+    preserve_mass = config.dependency_preserve_attention_mass or (
+        config.proposal_strategy == "confidence_threshold"
+        and config.confidence_ranking == "incoming"
+    )
+    reference = None
+    if preserve_mass and config.dependency_sink_filter_enabled:
+        reference = build_active_dependency_matrix(
+            base_forward.structure, dict(base_forward.captures),
+            # Sink identity is defined by the original conditional view, even
+            # when the new proposal retains absolute full-key attention mass.
+            renormalize_selected_keys=True,
+            **common,
+        )
+    dependency = build_active_dependency_matrix(
+        base_forward.structure, dict(base_forward.captures),
+        renormalize_selected_keys=(False if preserve_mass else config.dependency_renormalize_selected_keys),
+        **common,
+    )
+    return filter_dependency_sinks(
+        dependency,
+        enabled=config.dependency_sink_filter_enabled,
+        sink_quantile=config.dependency_sink_quantile,
+        sink_threshold=config.dependency_sink_threshold,
+        renormalize_rows=not preserve_mass,
+        sink_reference=reference,
+    )
+
+
+def build_confidence_threshold_candidates(
+    base_forward: DependencyBaseForwardOutput,
+    *,
+    active_mask: torch.Tensor,
+    requested_k: torch.Tensor,
+    anchor_state: CommittedAnchorState | None,
+    response_mask: torch.Tensor,
+    attention_mask: torch.Tensor,
+    entropy_map: torch.Tensor,
+    confidence: torch.Tensor,
+    config: DependencyGuidedSamplerConfig,
+    generation_seed: int,
+) -> tuple[CandidateBatch, DependencyCaptureOutput | None, float, float]:
+    """Return one thresholded action, with a highest-confidence singleton fallback.
+
+    Incoming ranking uses all eligible masked queries, including those below the
+    admission threshold. Threshold admission and attention ranking are separate.
+    """
+    del requested_k, anchor_state
+    _synchronize_for_timing(active_mask, config.diagnostic_metadata)
+    reconstruction_started = time.perf_counter()
+    dependency = None
+    ranking = confidence.float().clone()
+    if config.confidence_ranking == "incoming":
+        dependency = reconstruct_dependency_for_proposals(
+            base_forward, active_mask=active_mask, response_mask=response_mask,
+            attention_mask=attention_mask, config=config,
+        )
+        weights = _gather_compact_values(entropy_map.float(), dependency.query_positions, dependency.query_valid_mask)
+        influence = torch.bmm(dependency.directed.transpose(1, 2), weights.unsqueeze(-1)).squeeze(-1)
+        ranking.zero_()
+        for row in range(active_mask.shape[0]):
+            valid = dependency.query_valid_mask[row]
+            positions = dependency.query_positions[row, valid]
+            ranking[row, positions] = confidence[row, positions] * influence[row, valid]
+    _synchronize_for_timing(active_mask, config.diagnostic_metadata)
+    reconstruction_seconds = time.perf_counter() - reconstruction_started if dependency is not None else 0.0
+    proposal_started = time.perf_counter()
+    batch_size, sequence_length = active_mask.shape
+    requested = torch.full((batch_size,), config.dependency_max_action_size, device=active_mask.device, dtype=torch.long)
+    clipped = torch.minimum(requested, active_mask.sum(dim=-1))
+    width = int(clipped.max().item()) if batch_size else 0
+    masks = torch.zeros((1, batch_size, sequence_length), device=active_mask.device, dtype=torch.bool)
+    positions = torch.full((1, batch_size, width), -1, device=active_mask.device, dtype=torch.long)
+    seeds = torch.full((1, batch_size), -1, device=active_mask.device, dtype=torch.long)
+    scores = torch.full((1, batch_size), -torch.inf, device=active_mask.device)
+    fallback = []
+    for row in range(batch_size):
+        eligible = torch.nonzero(active_mask[row], as_tuple=False).flatten()
+        # Compare in float32 so a Python threshold such as .9 is not rounded
+        # down to .8984375 by a bf16 confidence tensor before admission.
+        qualified = eligible[confidence[row, eligible].float() >= config.confidence_threshold]
+        use_fallback = qualified.numel() == 0 and eligible.numel() > 0
+        fallback.append(bool(use_fallback))
+        if not eligible.numel():
+            continue
+        if use_fallback:
+            chosen = eligible[torch.argmax(confidence[row, eligible])].reshape(1)
+        else:
+            order = torch.argsort(ranking[row, qualified], descending=True, stable=True)
+            chosen = qualified[order[:config.dependency_max_action_size]]
+        seeds[0, row] = chosen[0]
+        masks[0, row, chosen] = True
+        positions[0, row, :chosen.numel()] = chosen.sort().values
+        scores[0, row] = ranking[row, chosen].mean()
+    candidates = CandidateBatch(
+        candidate_masks=masks, names=("confidence_threshold",), proposal_scores=scores,
+        seed_anchors=seeds, selected_positions=positions,
+        mean_within_set_dependency=torch.zeros_like(scores),
+        candidate_valid=masks.any(dim=-1), eligible_mask=active_mask,
+        requested_k=requested, clipped_k=clipped,
+        metadata=({"source": "confidence_threshold", "fallback_by_batch": tuple(fallback),
+                   "is_fallback_by_batch": tuple(fallback),
+                   "fallback_source_by_batch": tuple("highest_confidence_singleton" if value else None for value in fallback)},),
+        generation_seed=generation_seed,
+        configuration={"proposal": "confidence_threshold", "confidence_threshold": config.confidence_threshold,
+                       "confidence_ranking": config.confidence_ranking, "maximum_action_size": config.dependency_max_action_size,
+                       "candidate_action_set_count_by_batch": tuple(int(value) for value in masks.any(dim=-1)[0].tolist()),
+                       "expected_candidate_count_by_batch": tuple(int(value) for value in masks.any(dim=-1)[0].tolist())},
+        action_sizes=masks.sum(dim=-1),
+    )
+    _synchronize_for_timing(active_mask, config.diagnostic_metadata)
+    return candidates, dependency, reconstruction_seconds, time.perf_counter() - proposal_started
+
+
 def build_dependency_candidates(
     base_forward: DependencyBaseForwardOutput,
     *,
@@ -597,21 +759,12 @@ def build_dependency_candidates(
         dependency_active_mask = active_mask | anchor_state.reliable_anchor_mask
     _synchronize_for_timing(active_mask, config.diagnostic_metadata)
     reconstruction_started_at = time.perf_counter()
-    dependency = build_active_dependency_matrix(
-        base_forward.structure,
-        dict(base_forward.captures),
+    dependency = reconstruct_dependency_for_proposals(
+        base_forward,
         active_mask=dependency_active_mask,
         response_mask=response_mask,
         attention_mask=attention_mask,
-        zero_diagonal=config.dependency_zero_diagonal,
-        renormalize_selected_keys=config.dependency_renormalize_selected_keys,
-    )
-    dependency = filter_dependency_sinks(
-        dependency,
-        enabled=config.dependency_sink_filter_enabled,
-        sink_quantile=config.dependency_sink_quantile,
-        sink_threshold=config.dependency_sink_threshold,
-        renormalize_rows=True,
+        config=config,
     )
     _synchronize_for_timing(active_mask, config.diagnostic_metadata)
     reconstruction_seconds = time.perf_counter() - reconstruction_started_at
@@ -680,6 +833,7 @@ def build_dependency_candidates(
                 stopping_rule=cardinality_strategy,
                 utility_threshold=config.dependency_utility_threshold,
                 entropy_budget=config.dependency_entropy_budget,
+                budget_search=config.dependency_budget_search,
                 name_prefix="adaptive_candidate",
                 **shared_parallel_kwargs,
             )
@@ -1277,6 +1431,11 @@ def build_step_diagnostics(
                 "dependency_confidence_exponent": (
                     config.dependency_confidence_exponent
                 ),
+                "dependency_preserve_attention_mass": config.dependency_preserve_attention_mass,
+                "dependency_budget_search": config.dependency_budget_search,
+                "confidence_threshold": config.confidence_threshold,
+                "confidence_ranking": config.confidence_ranking,
+                "commit_mode": config.commit_mode,
                 "dependency_parallel_variant": (
                     config.dependency_parallel_variant
                 ),

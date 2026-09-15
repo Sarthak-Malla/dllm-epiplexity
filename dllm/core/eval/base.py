@@ -81,9 +81,14 @@ class BaseEvalHarness(LM):
         if "pretrained" in kwargs:
             kwargs.setdefault("model_name_or_path", kwargs["pretrained"])
         self.model_args = self._build_config(ModelArguments, model_args, kwargs)
+        load_placement = (
+            {"device_map": {"": str(torch.device(device))}}
+            if accelerator.num_processes == 1 else {}
+        )
         self.model = dllm.utils.get_model(
             self.model_args,
             config=eval_config.get_model_config(self.model_args.model_name_or_path),
+            **load_placement,
         )
         self.model.eval()
         self.tokenizer = dllm.utils.get_tokenizer(self.model_args)

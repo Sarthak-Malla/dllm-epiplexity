@@ -1,0 +1,10 @@
+{
+  "task": "gsm8k_cot",
+  "num_fewshot": 5,
+  "primary_metric": "exact_match",
+  "primary_filter": "flexible-extract",
+  "generation": {"max_new_tokens": 256, "block_size": 64, "steps": 64},
+  "report_split_at": 100,
+  "apply_chat_template": true,
+  "confirm_run_unsafe_code": false
+}

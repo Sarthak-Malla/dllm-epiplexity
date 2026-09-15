@@ -149,8 +149,43 @@ def _construct_stopped_soft_full_subset(
     stopping_rule: str,
     utility_threshold: float,
     entropy_budget: float,
+    budget_search: str = "first_unaffordable",
 ) -> tuple[list[int], list[float], str]:
     """Grow one soft-full ordering with vectorized device-side marginal scores."""
+    if budget_search not in {"first_unaffordable", "best_affordable"}:
+        raise ValueError("Unknown budget_search policy.")
+    if budget_search == "best_affordable":
+        if stopping_rule != "entropy_budget":
+            raise ValueError("best_affordable requires entropy_budget stopping.")
+        selected = [seed]
+        marginals = [float(utility[seed])]
+        cumulative_entropy = float(entropy[seed])
+        stop_reason = "maximum_action_size"
+        while len(selected) < maximum_action_size:
+            remaining = [position for position in eligible_positions if position not in selected]
+            if not remaining:
+                stop_reason = "eligible_exhausted"
+                break
+            remaining_tensor = torch.tensor(remaining, device=utility.device, dtype=torch.long)
+            affordable = remaining_tensor[
+                entropy[remaining_tensor].double() + cumulative_entropy <= entropy_budget
+            ]
+            if not affordable.numel():
+                stop_reason = "entropy_budget"
+                break
+            selected_tensor = torch.tensor(selected, device=utility.device, dtype=torch.long)
+            interaction_risk = 1.0 - torch.minimum(
+                confidence[affordable, None], confidence[selected_tensor][None, :]
+            )
+            penalties = (conflict[affordable[:, None], selected_tensor[None, :]] * interaction_risk).sum(dim=-1)
+            marginal = utility[affordable] - float(conflict_penalty) * penalties
+            # Eligible positions are in ascending compact order, retaining ties.
+            best = int(torch.argmax(marginal).item())
+            chosen = int(affordable[best].item())
+            selected.append(chosen)
+            marginals.append(float(marginal[best]))
+            cumulative_entropy += float(entropy[chosen])
+        return selected, marginals, stop_reason
     growth_limit = min(maximum_action_size, len(eligible_positions))
     selected_indices = torch.empty(
         growth_limit,
@@ -292,6 +327,7 @@ def generate_stopped_soft_full_candidates(
     stopping_rule: str,
     utility_threshold: float = 0.0,
     entropy_budget: float = 1.0,
+    budget_search: str = "first_unaffordable",
     direction: str = "outgoing",
     target_weighting: str = "entropy",
     confidence_exponent: float = 0.0,
@@ -321,6 +357,10 @@ def generate_stopped_soft_full_candidates(
     )
     if stopping_rule not in STOPPING_RULES:
         raise ValueError(f"stopping_rule must be one of {STOPPING_RULES}.")
+    if budget_search not in {"first_unaffordable", "best_affordable"}:
+        raise ValueError("budget_search must be first_unaffordable or best_affordable.")
+    if budget_search == "best_affordable" and stopping_rule != "entropy_budget":
+        raise ValueError("best_affordable requires entropy_budget stopping.")
     for name, value, nonnegative in (
         ("utility_threshold", utility_threshold, False),
         ("entropy_budget", entropy_budget, True),
@@ -396,6 +436,7 @@ def generate_stopped_soft_full_candidates(
                 stopping_rule=stopping_rule,
                 utility_threshold=float(utility_threshold),
                 entropy_budget=float(entropy_budget),
+                budget_search=budget_search,
             )
             canonical = tuple(sorted(selected))
             if canonical in seen:
@@ -640,6 +681,7 @@ def generate_stopped_soft_full_candidates(
             "maximum_action_size": maximum_action_size,
             "utility_threshold": float(utility_threshold),
             "entropy_budget": float(entropy_budget),
+            "budget_search": budget_search,
             "direction": direction,
             "target_weighting": target_weighting,
             "confidence_exponent": float(confidence_exponent),
