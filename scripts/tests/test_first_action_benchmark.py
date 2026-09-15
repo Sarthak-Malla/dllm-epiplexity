@@ -22,7 +22,8 @@ from examples.path_selection.experiments.artifacts import RunStore
 from examples.path_selection.experiments.configs import benchmark_configs, benchmark_selector_schedule
 from examples.path_selection.experiments.telemetry import ExperimentLogger
 from dllm.core.samplers.entropy_drop import EntropyDropSampler
-from scripts.tests.test_dependency_guided_decoder import _make_tiny_llada, _tokenizer
+# conftest.py exposes sibling tests; lm-eval owns the top-level scripts package.
+from test_dependency_guided_decoder import _make_tiny_llada, _tokenizer
 
 
 @pytest.mark.parametrize("tokens", [[126081], []])
@@ -240,7 +241,7 @@ def test_resume_rejects_changed_selector_schedule(tmp_path):
 
 
 def test_compact_wandb_state_rebuilds_native_metrics_on_resume(tmp_path, monkeypatch):
-    from scripts.tests.test_experiment_telemetry import _client
+    from test_experiment_telemetry import _client
 
     calls, runs = _client(monkeypatch)
     configuration = {"task": "synthetic", "document_ids": [0],

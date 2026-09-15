@@ -26,7 +26,7 @@ from dllm.core.samplers.parallel_candidates import (
     record_committed_anchors,
 )
 from dllm.core.samplers.utils import get_num_transfer_tokens
-from scripts.tests.test_dependency_guided_decoder import _make_tiny_llada, _tokenizer
+from test_dependency_guided_decoder import _make_tiny_llada, _tokenizer
 
 
 class PrecedenceModel(nn.Module):

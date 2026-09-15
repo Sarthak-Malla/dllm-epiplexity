@@ -109,11 +109,22 @@ sbatch /home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/exper
 ```
 
 Each job requests two GPUs, 24 CPUs, 64 GB RAM, and 24 hours. It prepares dllm,
-runs synthetic validation tests on the compute node, benchmarks the selected arms,
-and writes a merged report. Each arm uses two independent workers with disjoint
+benchmarks the selected arms, and writes a merged report. Validation tests run
+only through the separate launcher below. Each arm uses two independent workers with disjoint
 document assignments. No snapshot collection or diagnostic forks are required.
 Resubmitting the same command resumes completed documents. Source or configuration
 changes require a new run tag.
+
+Jobs 240498 and 240499 stopped during the validation tests with
+`ModuleNotFoundError: No module named 'scripts.tests'`, before model loading or
+benchmark generation. The bundled lm-eval harness has its own `scripts` package;
+the benchmark and replay tests now import sibling helpers through the existing
+test-directory setup in
+[conftest.py](/home/sarthak.malla/dllm-selection-ensemble/scripts/tests/conftest.py).
+Validation now runs separately from benchmark jobs. These failed attempts wrote no
+benchmark records, so the same submissions can be retried without a new run tag.
+Both jobs also logged CUDA driver initialization warnings on `gpu-54`; the
+launcher excludes that node pending a GPU health check on the cluster.
 
 The commands above run only the new hybrid on GSM8K and all three policies on
 HumanEval: two jobs, four new policy benchmarks, and eight W&B worker runs.
@@ -148,6 +159,20 @@ The report includes task-native metrics, paired primary-accuracy comparisons,
 model evaluations, and generation latency. The optional `report_split_at` setting
 also reports a document prefix and remainder separately; the GSM8K configuration
 uses it to separate the previously explored development prefix.
+
+### Run validation separately
+
+Submit the synthetic validation suite when checking implementation changes:
+
+```bash
+sbatch /home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/experiments/01_selectors/validate_benchmark.slurm.sh
+```
+
+This independent compute-node job requests two CPUs, 16 GB RAM, and 20 minutes,
+with no GPUs. It prepares the dllm environment and runs the five benchmark,
+runner, analysis, telemetry, and import test files formerly bundled with benchmark
+submission. Tests use synthetic data, a tiny CPU model, and a fake W&B client.
+Benchmark submissions neither invoke this launcher nor depend on its completion.
 
 ## W&B and compact artifacts
 
