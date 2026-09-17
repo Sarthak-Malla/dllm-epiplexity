@@ -1,10 +1,10 @@
 """Construct fixed-k dependency candidates with conflicts and committed anchors.
 
-Run the focused CPU tests with:
-    source /apps/local/conda_init.sh
+Run the focused CPU tests on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_parallel_candidates.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_parallel_candidates.py -v
 """
 
 from __future__ import annotations
@@ -29,6 +29,54 @@ PARALLEL_VARIANTS = (
     "soft_no_anchor",
     "soft_full",
 )
+
+
+def dependency_seed_scores(
+    dependency: torch.Tensor,
+    entropy: torch.Tensor,
+    confidence: torch.Tensor,
+    eligible_mask: torch.Tensor,
+    *,
+    legacy_scores: torch.Tensor,
+    seed_strategy: str = "legacy",
+    seed_entropy_weight: float = 0.0,
+) -> torch.Tensor:
+    """Rank seeds from validated position tensors without changing companions.
+
+    Legacy scores retain their original anchor support. Corrected scores exclude
+    anchor support and affect only seed ordering, including its Gumbel sampling.
+    """
+    if seed_strategy not in SEED_STRATEGIES:
+        raise ValueError(f"seed_strategy must be one of {SEED_STRATEGIES}.")
+    if isinstance(seed_entropy_weight, bool) or not isinstance(
+        seed_entropy_weight, (int, float)
+    ):
+        raise TypeError("seed_entropy_weight must be numeric.")
+    if not math.isfinite(float(seed_entropy_weight)) or seed_entropy_weight < 0:
+        raise ValueError("seed_entropy_weight must be finite and nonnegative.")
+    if seed_strategy != "incoming" and seed_entropy_weight != 0:
+        raise ValueError("seed_entropy_weight requires the incoming seed strategy.")
+    if seed_strategy == "legacy":
+        return legacy_scores
+    if seed_strategy == "confidence":
+        return torch.where(
+            eligible_mask, confidence, torch.full_like(confidence, -torch.inf),
+        )
+
+    scores = dependency_anchor_scores(
+        dependency, entropy, eligible_mask,
+        direction="incoming", target_weighting="entropy",
+        confidence=confidence, confidence_exponent=1.0,
+    )
+    if seed_entropy_weight > 0:
+        # Avoid multiplying ineligible -inf by an underflowed zero weight.
+        scores = torch.where(
+            eligible_mask,
+            torch.where(eligible_mask, scores, 0.0)
+            * torch.exp(-float(seed_entropy_weight) * entropy),
+            torch.full_like(scores, -torch.inf),
+        )
+    return scores
 
 
 def _validate_bool_mask(
@@ -683,8 +731,6 @@ def generate_parallel_dependency_candidates(
     ).float()
     if variant not in PARALLEL_VARIANTS:
         raise ValueError(f"variant must be one of {PARALLEL_VARIANTS}.")
-    if seed_strategy not in SEED_STRATEGIES:
-        raise ValueError(f"seed_strategy must be one of {SEED_STRATEGIES}.")
     if (
         isinstance(candidate_budget, bool)
         or not isinstance(candidate_budget, int)
@@ -696,14 +742,11 @@ def generate_parallel_dependency_candidates(
         ("hard_conflict_threshold", hard_conflict_threshold),
         ("anchor_support_weight", anchor_support_weight),
         ("position_temperature", position_temperature),
-        ("seed_entropy_weight", seed_entropy_weight),
     ):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{name} must be numeric.")
         if not math.isfinite(float(value)) or value < 0:
             raise ValueError(f"{name} must be finite and nonnegative.")
-    if seed_strategy != "incoming" and seed_entropy_weight != 0:
-        raise ValueError("seed_entropy_weight requires the incoming seed strategy.")
     if (
         isinstance(generation_seed, bool)
         or not isinstance(generation_seed, int)
@@ -755,24 +798,15 @@ def generate_parallel_dependency_candidates(
     # Keep companion utility and combination-refill order on their legacy path.
     # Only the seeds (including their existing Gumbel ordering) use the new score.
     refill_scores = seed_scores
-    if seed_strategy == "incoming":
-        seed_scores = dependency_anchor_scores(
-            dependency, entropy, eligible,
-            direction="incoming", target_weighting="entropy",
-            confidence=confidence, confidence_exponent=1.0,
-        )
-        if seed_entropy_weight > 0:
-            # Avoid multiplying ineligible -inf by an underflowed zero weight.
-            seed_scores = torch.where(
-                eligible,
-                torch.where(eligible, seed_scores, 0.0)
-                * torch.exp(-float(seed_entropy_weight) * entropy),
-                torch.full_like(seed_scores, -torch.inf),
-            )
-    elif seed_strategy == "confidence":
-        seed_scores = torch.where(
-            eligible, confidence, torch.full_like(confidence, -torch.inf),
-        )
+    seed_scores = dependency_seed_scores(
+        dependency,
+        entropy,
+        confidence,
+        eligible,
+        legacy_scores=seed_scores,
+        seed_strategy=seed_strategy,
+        seed_entropy_weight=seed_entropy_weight,
+    )
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(generation_seed)

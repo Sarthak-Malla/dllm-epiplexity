@@ -1,10 +1,10 @@
-"""Shared fixed-k dependency proposal and lookahead integration.
+"""Shared fixed and adaptive dependency proposal and lookahead integration.
 
-Run the focused CPU tests with:
-    source /apps/local/conda_init.sh
+Run the focused CPU tests on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from dllm.core.samplers.adaptive_cardinality import (
     ADAPTIVE_CARDINALITY_STRATEGIES,
     CARDINALITY_STRATEGIES,
     SIZE_SCORING_RULES,
+    STOPPING_RULES,
     apply_size_aware_scoring,
     generate_joint_k_dependency_candidates,
     generate_stopped_soft_full_candidates,
@@ -51,6 +52,7 @@ from dllm.core.samplers.dependency import (
     filter_dependency_sinks,
 )
 from dllm.core.samplers.mdlm import MDLMSamplerConfig
+from dllm.core.samplers.non_lookahead import NonLookaheadSelectionOutput
 from dllm.core.samplers.parallel_candidates import (
     CONFLICT_NORMALIZATIONS,
     PARALLEL_VARIANTS,
@@ -77,7 +79,7 @@ SUPPORTED_DEPENDENCY_FALLBACKS = ("dependency_only",)
 
 @dataclass
 class DependencyGuidedSamplerConfig(MDLMSamplerConfig):
-    """Configuration shared by the entropy and risk fixed-k decoders."""
+    """Configuration shared by the fixed and adaptive dependency decoders."""
 
     # Disabled by default so existing sampler behavior is unchanged.
     proposal_strategy: str = "legacy"
@@ -168,7 +170,7 @@ def resolve_dependency_guided_config(
 
 
 def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> None:
-    """Fail before decoding when fixed-k configuration is unsupported."""
+    """Fail before decoding when dependency configuration is unsupported."""
     if config.proposal_strategy not in SUPPORTED_PROPOSAL_STRATEGIES:
         raise ValueError(
             f"Unknown proposal_strategy {config.proposal_strategy!r}. Available: "
@@ -262,12 +264,21 @@ def validate_dependency_guided_config(config: DependencyGuidedSamplerConfig) -> 
         )
     if config.dependency_seed_strategy not in SEED_STRATEGIES:
         raise ValueError(f"dependency_seed_strategy must be one of {SEED_STRATEGIES}.")
+    supports_custom_seeds = (
+        config.dependency_cardinality_strategy in STOPPING_RULES
+        or (
+            config.dependency_cardinality_strategy == "fixed"
+            and config.dependency_commit_k > 1
+        )
+    )
     if config.dependency_seed_strategy != "legacy" and (
         config.proposal_strategy != PROPOSED_PROPOSAL_STRATEGY
-        or config.dependency_cardinality_strategy != "fixed"
-        or config.dependency_commit_k <= 1
+        or not supports_custom_seeds
     ):
-        raise ValueError("Custom seed strategies require fixed dependency construction with commit_k > 1.")
+        raise ValueError(
+            "Custom seed strategies require dependency construction with "
+            "entropy_budget, marginal_utility, or fixed commit_k > 1."
+        )
     if config.dependency_seed_strategy != "incoming" and config.dependency_seed_entropy_weight != 0:
         raise ValueError("dependency_seed_entropy_weight requires the incoming seed strategy.")
     if config.candidate_chunk_size is not None and (
@@ -666,10 +677,7 @@ def build_dependency_candidates(
                 name_prefix="joint_candidate",
                 **shared_parallel_kwargs,
             )
-        elif cardinality_strategy in {
-            "marginal_utility",
-            "entropy_budget",
-        }:
+        elif cardinality_strategy in STOPPING_RULES:
             compact_candidates = generate_stopped_soft_full_candidates(
                 dependency.directed,
                 compact_entropy,
@@ -681,6 +689,8 @@ def build_dependency_candidates(
                 utility_threshold=config.dependency_utility_threshold,
                 entropy_budget=config.dependency_entropy_budget,
                 name_prefix="adaptive_candidate",
+                seed_strategy=config.dependency_seed_strategy,
+                seed_entropy_weight=config.dependency_seed_entropy_weight,
                 **shared_parallel_kwargs,
             )
         else:
@@ -913,6 +923,124 @@ def _metadata_value_for_batch(
     if isinstance(by_batch, (tuple, list)) and batch_index < len(by_batch):
         return by_batch[batch_index]
     return metadata.get(name)
+
+
+def build_non_lookahead_step_diagnostics(
+    selection: NonLookaheadSelectionOutput,
+    base_forward: DependencyBaseForwardOutput,
+    *,
+    config: DependencyGuidedSamplerConfig,
+    confidence: torch.Tensor,
+    entropy: torch.Tensor,
+    predicted_token_ids: torch.Tensor,
+    masked_active_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    block_index: int,
+    step_index: int,
+    global_step_index: int,
+    generation_seed: int,
+) -> list[dict[str, object]]:
+    """Record base-pass selection without extra forwards or vocabulary tensors."""
+    candidates = selection.candidates
+    # Transfer position-sized data once; retain no logits, Q/K, or attention maps.
+    masks = candidates.candidate_masks.detach().cpu()
+    valid = candidates.candidate_valid.detach().cpu()
+    confidences = confidence.detach().float().cpu()
+    entropies = entropy.detach().float().cpu()
+    predictions = predicted_token_ids.detach().cpu()
+    seeds = candidates.seed_anchors.detach().cpu()
+    scores = selection.selection_scores.detach().cpu()
+    proposal_scores = candidates.proposal_scores.detach().cpu()
+    conflicts = candidates.mean_within_set_dependency.detach().cpu()
+    winners = selection.best_index.detach().cpu().tolist()
+    remaining = (masked_active_mask & response_mask).sum(-1).cpu().tolist()
+    eligible_counts = candidates.eligible_mask.sum(-1).cpu().tolist()
+    diagnostics = []
+    for row, winner in enumerate(winners):
+        records = []
+        for index, name in enumerate(candidates.names):
+            if not bool(valid[index, row]):
+                continue
+            positions = torch.where(masks[index, row])[0]
+            metadata = candidates.metadata[index]
+            values = confidences[row, positions]
+            entropy_values = entropies[row, positions]
+            seed = int(seeds[index, row])
+            record = {
+                "index": index,
+                "name": name,
+                "valid": True,
+                "positions": positions.tolist(),
+                "token_ids": predictions[row, positions].tolist(),
+                "action_size": int(positions.numel()),
+                "mean_confidence": float(values.mean()),
+                "min_confidence": float(values.min()),
+                "entropy_sum": float(entropy_values.sum()),
+                "mean_entropy": float(entropy_values.mean()),
+                "seed_position": seed,
+                "seed_confidence": float(confidences[row, seed]) if seed >= 0 else None,
+                "seed_entropy": float(entropies[row, seed]) if seed >= 0 else None,
+                "selection_score": float(scores[index, row]),
+                "proposal_score": float(proposal_scores[index, row]),
+                "mean_within_set_conflict": float(conflicts[index, row]),
+            }
+            for name in (
+                "seed_rank", "source", "fallback_source", "stopping_reason",
+                "max_within_set_conflict", "anchor_support_sum",
+            ):
+                record[name] = _metadata_value_for_batch(metadata, name, row)
+            record["fallback"] = bool(
+                _metadata_value_for_batch(metadata, "is_fallback", row)
+            )
+            records.append(record)
+        selected = next((item for item in records if item["index"] == winner), None)
+        ordered_scores = sorted(
+            (item["selection_score"] for item in records), reverse=True,
+        )
+        diagnostics.append({
+            "schema_version": 1,
+            "candidate_selector": selection.selector,
+            "lookahead": False,
+            "block_index": block_index,
+            "step_index": step_index,
+            "global_step_index": global_step_index,
+            "generation_seed": generation_seed,
+            "remaining_response_masks": remaining[row],
+            "candidate_action_space_size": eligible_counts[row],
+            "candidate_budget_requested": config.candidate_budget,
+            "candidate_count_realized": len(records),
+            "commit_k": selected["action_size"] if selected is not None else 0,
+            "cardinality_strategy": config.dependency_cardinality_strategy,
+            "entropy_budget": config.dependency_entropy_budget,
+            "maximum_action_size": config.dependency_max_action_size,
+            "dependency_seed_strategy": config.dependency_seed_strategy,
+            "dependency_seed_entropy_weight": config.dependency_seed_entropy_weight,
+            "dependency_direction": config.dependency_direction,
+            "dependency_confidence_exponent": config.dependency_confidence_exponent,
+            "candidates": records,
+            "selected_candidate": selected,
+            "selected_set_mean_conflict": (
+                selected["mean_within_set_conflict"] if selected is not None else None
+            ),
+            "selected_set_max_conflict": (
+                selected["max_within_set_conflict"] if selected is not None else None
+            ),
+            "selected_fallback_source": (
+                selected["fallback_source"] if selected is not None else None
+            ),
+            "winning_margin": (
+                ordered_scores[0] - ordered_scores[1] if len(ordered_scores) > 1 else None
+            ),
+            "captured_base_forward_count": base_forward.captured_base_forward_count,
+            "lookahead_model_calls": 0,
+            "model_calls": base_forward.captured_base_forward_count,
+            # CFG concatenates two rows into one call; distinguish work from calls.
+            "base_sequence_evaluations": (
+                base_forward.capture_batch_size // masked_active_mask.shape[0]
+            ),
+            "base_forward_seconds": base_forward.base_forward_seconds,
+        })
+    return diagnostics
 
 
 def build_step_diagnostics(

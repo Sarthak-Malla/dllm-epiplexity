@@ -1,12 +1,13 @@
 """
 Run LLaDA evaluation with a selectable path-selection sampler.
 
-From the repository root:
+Prepare the environment, then run evaluation on a compute node:
 
-    source ~/.bashrc
-    conda activate dllm
-    accelerate launch --num_processes 1 \
-        examples/path_selection/eval.py \
+    source /home/sarthak.malla/.zshrc
+    conda activate /home/sarthak.malla/.conda/envs/dllm
+    export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --gres=gpu:1 --cpus-per-task=24 --time=03:00:00 python \
+        /home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/eval.py \
         --tasks gsm8k_cot \
         --model llada_path_selection \
         --apply_chat_template \
@@ -15,9 +16,12 @@ From the repository root:
         --model_args "sampler_type=greedy,pretrained=GSAI-ML/LLaDA-8B-Instruct,max_new_tokens=32,steps=8,block_size=8,cfg_scale=0.0"
 
 Use ``--model_args sampler_type=greedy`` for the native baseline.
+Use ``sampler_type=max_confidence`` to rank dependency candidates by their mean
+base-pass token confidence without a lookahead forward.
 """
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,6 +38,10 @@ from dllm.core.eval import MDLMEvalConfig, MDLMEvalHarness, MDLMEvalSamplerConfi
 from dllm.core.eval.diagnostic_retention import (
     DIAGNOSTIC_RETENTION_MODES,
     retain_diagnostics,
+)
+from dllm.core.eval.decoding_summary import (
+    aggregate_decoding_summaries,
+    summarize_decoding_steps,
 )
 from dllm.core.eval.wandb_monitor import log_generation_progress
 from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
@@ -108,12 +116,19 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
                 oracle_candidate_strategy=oracle_candidate_strategy,
                 return_dict=True,  # Enable return_dict for candidate tracking
             )
-        elif sampler_type == "dependency_non_lookahead":
+        elif sampler_type in {"dependency_non_lookahead", "max_confidence"}:
             from dllm.core.samplers.dependency_non_lookahead import (
                 DependencyNonLookaheadSampler,
                 DependencyNonLookaheadSamplerConfig,
             )
 
+            if sampler_type == "max_confidence" and kwargs.get(
+                "dependency_candidate_selector", "max_confidence"
+            ) != "max_confidence":
+                raise ValueError(
+                    "sampler_type='max_confidence' requires "
+                    "dependency_candidate_selector='max_confidence'."
+                )
             sampler_cls = DependencyNonLookaheadSampler
             sampler_config = DependencyNonLookaheadSamplerConfig(return_dict=True)
         elif sampler_type in {"risk_reduction", "dependency_risk"}:
@@ -129,7 +144,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
         else:
             available = (
                 "greedy, entropy_drop, risk_reduction, dependency_entropy, "
-                "dependency_risk, dependency_non_lookahead"
+                "dependency_risk, dependency_non_lookahead, max_confidence"
             )
             raise ValueError(
                 f"Unknown sampler_type: {sampler_type}. Available: {available}."
@@ -144,6 +159,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
         self.sampler_type = sampler_type
         self.selected_candidates_per_example = []
         self.diagnostics_per_example = []
+        self.decoding_per_example = []
         self.generation_batch_seconds = []
         self.example_index = 0
         self.diagnostic_retention = diagnostic_retention
@@ -209,17 +225,32 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
             for batch_index, (candidates, _example_diagnostics) in enumerate(
                 zip(selected_candidates, diagnostics)
             ):
-                self.selected_candidates_per_example.append({
+                request = batch[batch_index]
+                identity = {
                     "example_index": self.example_index,
+                    "rank": self.rank,
+                    "task_name": getattr(request, "task_name", None),
+                    "doc_id": getattr(request, "doc_id", None),
+                    "request_index": getattr(request, "idx", None),
+                    "prompt_sha256": hashlib.sha256(
+                        contexts[batch_index].encode("utf-8")
+                    ).hexdigest(),
+                }
+                self.selected_candidates_per_example.append({
+                    **identity,
                     "selected_candidates": candidates,
                 })
                 retained_example_diagnostics = retained_diagnostics[batch_index]
                 self.diagnostics_per_example.append(
                     {
-                        "example_index": self.example_index,
+                        **identity,
                         "steps": retained_example_diagnostics,
                     }
                 )
+                self.decoding_per_example.append({
+                    **identity,
+                    "summary": summarize_decoding_steps(_example_diagnostics),
+                })
                 self.example_index += 1
 
             if self.rank == 0:
@@ -297,6 +328,10 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
         )
         with open(diagnostics_path, "w") as f:
             json.dump(self.diagnostics_per_example, f, indent=2)
+        decoding_path = output_path.parent / f"{artifact_prefix}_decoding{rank_suffix}.json"
+        decoding_records = getattr(self, "decoding_per_example", [])
+        with open(decoding_path, "w") as f:
+            json.dump(decoding_records, f, indent=2)
         runtime_path = (
             output_path.parent
             / f"{artifact_prefix}_runtime{rank_suffix}.json"
@@ -308,6 +343,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
             "generation_total_seconds": sum(self.generation_batch_seconds),
             "generation_batch_seconds": self.generation_batch_seconds,
             "generation_batch_count": len(self.generation_batch_seconds),
+            "decoding_summary": aggregate_decoding_summaries(decoding_records),
             "cuda_peak_allocated_bytes": (
                 torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None
             ),
@@ -361,10 +397,20 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
                 ),
                 "rank_runtime_paths": [str(path) for path in rank_runtime_paths],
             }
+            all_decoding_records = []
+            for rank_index in range(world_size):
+                shard = output_path.parent / (
+                    f"{artifact_prefix}_decoding_rank{rank_index:05d}"
+                    f"-of-{world_size:05d}.json"
+                )
+                all_decoding_records.extend(json.loads(shard.read_text()))
+            completion_runtime["decoding_summary"] = aggregate_decoding_summaries(
+                all_decoding_records
+            )
             completion_path.write_text(
                 json.dumps(completion_runtime, indent=2) + "\n"
             )
-            for artifact_kind in ("candidates", "diagnostics"):
+            for artifact_kind in ("candidates", "diagnostics", "decoding"):
                 manifest_path = (
                     output_path.parent
                     / f"{artifact_prefix}_{artifact_kind}_manifest.json"
@@ -393,6 +439,7 @@ class LLaDAPathSelectionEvalHarness(MDLMEvalHarness):
         print(f"Selected candidates saved to {candidates_path}")
         print(f"Step diagnostics saved to {diagnostics_path}")
         print(f"Runtime metrics saved to {runtime_path}")
+        print(f"Per-example decoding summaries saved to {decoding_path}")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 """Test Phase-7 adaptive candidate construction and size-aware scoring.
 
-Run with:
-    source /apps/local/conda_init.sh
+Run on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_adaptive_cardinality.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_adaptive_cardinality.py -v
 """
 
 import pytest
@@ -20,6 +20,10 @@ from dllm.core.samplers.adaptive_cardinality import (
 )
 from dllm.core.samplers.batched_lookahead import BatchedLookaheadOutput
 from dllm.core.samplers.candidates import CandidateBatch
+from dllm.core.samplers.parallel_candidates import (
+    initialize_committed_anchor_state,
+    record_committed_anchors,
+)
 
 
 def _conflicted_four_position_case():
@@ -32,6 +36,18 @@ def _conflicted_four_position_case():
     entropy = torch.ones((1, 4), dtype=torch.float32)
     confidence = torch.zeros((1, 4), dtype=torch.float32)
     eligible = torch.ones((1, 4), dtype=torch.bool)
+    return dependency, entropy, confidence, eligible
+
+
+def _asymmetric_seed_case():
+    """Separate incoming influence from outgoing utility and own entropy."""
+    dependency = torch.zeros((1, 5, 5), dtype=torch.float32)
+    dependency[0, 0, 1] = 4.0
+    dependency[0, 2, 1] = 3.0
+    dependency[0, 1, 3] = 0.5
+    entropy = torch.tensor([[1.0, 3.0, 1.0, 0.1, 1.0]])
+    confidence = torch.tensor([[0.95, 0.6, 0.7, 0.8, 0.5]])
+    eligible = torch.ones((1, 5), dtype=torch.bool)
     return dependency, entropy, confidence, eligible
 
 
@@ -201,6 +217,232 @@ def test_entropy_budget_stops_before_an_uncertain_addition():
     assert candidates.metadata[0]["stopping_reason_by_batch"] == (
         "entropy_budget",
     )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "weight", "seed", "positions"),
+    (
+        ("legacy", 0.0, 0, [0, 2]),
+        ("incoming", 0.0, 1, [1]),
+        ("incoming", 1.0, 3, [0, 3]),
+        ("confidence", 0.0, 0, [0, 2]),
+    ),
+)
+def test_entropy_budget_corrected_seed_changes_start_and_retains_stopping(
+    strategy, weight, seed, positions,
+):
+    # Incoming scores are .6 * (4 + 3) = 4.2 at position 1 and
+    # .8 * .5 * 3 = 1.2 at position 3. Own-entropy weighting reverses them:
+    # 4.2 * exp(-3) < 1.2 * exp(-.1). Outgoing utility still prefers 0, then 2.
+    candidates = generate_stopped_soft_full_candidates(
+        *_asymmetric_seed_case(),
+        candidate_budget=1,
+        maximum_action_size=5,
+        stopping_rule="entropy_budget",
+        entropy_budget=2.0,
+        confidence_exponent=0.0,
+        conflict_penalty=0.0,
+        position_temperature=0.0,
+        seed_strategy=strategy,
+        seed_entropy_weight=weight,
+    )
+
+    assert candidates.seed_anchors[0, 0].item() == seed
+    assert candidates.selected_positions[0, 0].tolist() == (
+        positions + [-1] * (5 - len(positions))
+    )
+    assert candidates.action_sizes[0, 0].item() == len(positions)
+    assert candidates.metadata[0]["stopping_reason_by_batch"] == (
+        "entropy_budget",
+    )
+    # A seed may itself exceed the budget; the decoder must still make progress.
+    entropy = _asymmetric_seed_case()[1]
+    assert len(positions) == 1 or entropy[0, positions].sum().item() <= 2.0
+    assert candidates.configuration["seed_strategy"] == strategy
+    assert candidates.configuration["seed_entropy_weight"] == weight
+
+
+def test_incoming_seed_uses_confidence_with_legacy_exponent_zero():
+    dependency, entropy, confidence, eligible = _asymmetric_seed_case()
+    confidence[0, 1] = 0.1
+    candidates = generate_stopped_soft_full_candidates(
+        dependency, entropy, confidence, eligible,
+        candidate_budget=1,
+        maximum_action_size=5,
+        stopping_rule="entropy_budget",
+        entropy_budget=0.0,
+        confidence_exponent=0.0,
+        position_temperature=0.0,
+        seed_strategy="incoming",
+    )
+
+    # Position 1 now scores .1 * 7 = .7, below position 3's 1.2.
+    assert candidates.seed_anchors[0, 0].item() == 3
+
+
+@pytest.mark.parametrize("strategy,weight", (("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0)))
+def test_corrected_seeds_ignore_ineligible_queries_and_keys(strategy, weight):
+    dependency, entropy, confidence, eligible = _asymmetric_seed_case()
+    eligible[0, 4] = False
+    # These edges would otherwise make 2 or the excluded position 4 win.
+    dependency[0, 4, 2] = 10000.0
+    dependency[0, 2, 4] = 10000.0
+    confidence[0, 4] = 1.0
+    expected_seed = 0 if strategy == "confidence" else (3 if weight else 1)
+    # Include an empty batch row to exercise invalid padding alongside valid seeds.
+    candidates = generate_stopped_soft_full_candidates(
+        dependency.repeat(2, 1, 1),
+        entropy.repeat(2, 1),
+        confidence.repeat(2, 1),
+        torch.cat((eligible, torch.zeros_like(eligible))),
+        candidate_budget=4,
+        maximum_action_size=5,
+        stopping_rule="entropy_budget",
+        entropy_budget=0.0,
+        position_temperature=0.0,
+        seed_strategy=strategy,
+        seed_entropy_weight=weight,
+    )
+
+    assert candidates.seed_anchors[0, 0].item() == expected_seed
+    assert sorted(candidates.seed_anchors[:, 0].tolist()) == [0, 1, 2, 3]
+    assert not candidates.candidate_masks[:, :, 4].any()
+    assert not candidates.candidate_valid[:, 1].any()
+    assert candidates.seed_anchors[:, 1].tolist() == [-1] * 4
+
+
+@pytest.mark.parametrize("weight,seed", ((0.0, 1), (1.0, 3)))
+def test_committed_anchor_support_changes_companions_but_not_corrected_seed(
+    weight, seed,
+):
+    dependency, entropy, confidence, eligible = _asymmetric_seed_case()
+    eligible[0, 4] = False
+    confidence[0, 4] = 0.95
+    dependency[0, 2, 4] = 1000.0
+    empty = initialize_committed_anchor_state(eligible, confidence_threshold=0.9)
+    anchored = record_committed_anchors(
+        empty, ~eligible, confidence, torch.arange(5).unsqueeze(0), commit_step=0,
+    )
+    arguments = dict(
+        candidate_budget=1,
+        maximum_action_size=5,
+        stopping_rule="entropy_budget",
+        entropy_budget=4.1,
+        conflict_penalty=0.0,
+        position_temperature=0.0,
+    )
+
+    unanchored = generate_stopped_soft_full_candidates(
+        dependency, entropy, confidence, eligible,
+        **arguments, anchor_state=empty,
+        seed_strategy="incoming", seed_entropy_weight=weight,
+    )
+    supported = generate_stopped_soft_full_candidates(
+        dependency, entropy, confidence, eligible,
+        **arguments, anchor_state=anchored,
+        seed_strategy="incoming", seed_entropy_weight=weight,
+    )
+
+    assert unanchored.seed_anchors[0, 0].item() == seed
+    assert supported.seed_anchors[0, 0].item() == seed
+    assert unanchored.metadata[0]["construction_order_by_batch"][0][:2] == (seed, 0)
+    assert supported.metadata[0]["construction_order_by_batch"][0][:2] == (seed, 2)
+    assert not supported.candidate_masks[:, :, 4].any()
+    legacy = generate_stopped_soft_full_candidates(
+        dependency, entropy, confidence, eligible,
+        **arguments, anchor_state=anchored,
+    )
+    # The same support is strong enough to dominate the legacy seed utility.
+    assert legacy.seed_anchors[0, 0].item() == 2
+
+
+@pytest.mark.parametrize("entropy_budget", (2.0, 100.0))
+def test_seed_policy_preserves_companions_and_singleton_refill_for_same_order(
+    monkeypatch, entropy_budget,
+):
+    monkeypatch.setattr(
+        adaptive_cardinality, "_seed_order", lambda *args, **kwargs: list(range(5)),
+    )
+    pools = [
+        generate_stopped_soft_full_candidates(
+            *_asymmetric_seed_case(),
+            candidate_budget=5,
+            maximum_action_size=5,
+            stopping_rule="entropy_budget",
+            entropy_budget=entropy_budget,
+            conflict_penalty=0.7,
+            seed_strategy=strategy,
+            seed_entropy_weight=weight,
+        )
+        for strategy, weight in (
+            ("legacy", 0.0), ("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0),
+        )
+    ]
+
+    original = pools[0]
+    assert any(
+        record["fallback_source_by_batch"] == ("adaptive_singleton_refill",)
+        for record in original.metadata
+    )
+    for pool in pools[1:]:
+        assert torch.equal(pool.candidate_masks, original.candidate_masks)
+        assert torch.equal(pool.seed_anchors, original.seed_anchors)
+        assert torch.equal(pool.proposal_scores, original.proposal_scores)
+        assert pool.metadata == original.metadata
+        assert pool.configuration["refill_ranking"] == "legacy_companion_utility"
+    if entropy_budget == 100.0:
+        assert original.action_sizes[:, 0].tolist() == [5, 1, 1, 1, 1]
+        assert original.seed_anchors[1:, 0].tolist() == [0, 2, 1, 3]
+
+
+def test_adaptive_legacy_seed_default_preserves_candidates_and_rng_state():
+    arguments = dict(
+        candidate_budget=5,
+        maximum_action_size=5,
+        stopping_rule="entropy_budget",
+        entropy_budget=2.0,
+        position_temperature=0.7,
+        generation_seed=42,
+    )
+    rng_before = torch.random.get_rng_state().clone()
+    default = generate_stopped_soft_full_candidates(
+        *_asymmetric_seed_case(), **arguments,
+    )
+    explicit = generate_stopped_soft_full_candidates(
+        *_asymmetric_seed_case(), **arguments,
+        seed_strategy="legacy", seed_entropy_weight=0.0,
+    )
+
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
+    assert torch.equal(default.candidate_masks, explicit.candidate_masks)
+    assert torch.equal(default.seed_anchors, explicit.seed_anchors)
+    assert torch.equal(default.proposal_scores, explicit.proposal_scores)
+    assert default.metadata == explicit.metadata
+
+
+@pytest.mark.parametrize(
+    ("strategy", "weight", "error"),
+    (
+        ("unknown", 0.0, ValueError),
+        ("legacy", 1.0, ValueError),
+        ("confidence", 1.0, ValueError),
+        ("incoming", -1.0, ValueError),
+        ("incoming", float("nan"), ValueError),
+        ("incoming", float("inf"), ValueError),
+        ("incoming", True, TypeError),
+        ("incoming", "1.0", TypeError),
+    ),
+)
+def test_adaptive_generator_rejects_invalid_seed_settings(strategy, weight, error):
+    with pytest.raises(error):
+        generate_stopped_soft_full_candidates(
+            *_asymmetric_seed_case(),
+            candidate_budget=1,
+            maximum_action_size=5,
+            stopping_rule="entropy_budget",
+            seed_strategy=strategy,
+            seed_entropy_weight=weight,
+        )
 
 
 @pytest.mark.parametrize(

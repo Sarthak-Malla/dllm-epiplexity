@@ -1,11 +1,11 @@
 """
 Test the one-position counterfactual entropy/risk oracle.
 
-Run with:
-    source /apps/local/conda_init.sh
+Run on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
-    TEST_ROOT=/home/sarthak.malla/dllm-selection-ensemble/scripts/tests
-    pytest "${TEST_ROOT}/test_counterfactual_oracle.py" -v
+    export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_counterfactual_oracle.py -v
 """
 
 from dataclasses import fields
@@ -17,14 +17,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dllm.core.samplers.counterfactual import (
+    entropy_per_token,
     evaluate_one_position_counterfactuals,
 )
 
 
 def _manual_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """Compute a full-tensor FP32 reference, including suppressed tokens."""
     probabilities = F.softmax(logits.float(), dim=-1)
     log_probabilities = F.log_softmax(logits.float(), dim=-1)
-    return -(probabilities * log_probabilities).sum(dim=-1)
+    terms = torch.where(
+        probabilities > 0,
+        probabilities * log_probabilities,
+        torch.zeros_like(probabilities),
+    )
+    return -terms.sum(dim=-1)
 
 
 def _manual_risk(logits: torch.Tensor) -> torch.Tensor:
@@ -85,6 +92,110 @@ class StaticLookaheadModel(nn.Module):
     ) -> SimpleNamespace:
         self.seen_attention_mask = attention_mask
         return SimpleNamespace(logits=self.logits.expand(input_ids.shape[0], -1, -1))
+
+
+@pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16, torch.float16))
+@pytest.mark.parametrize("layout", ("contiguous", "transposed", "strided_vocabulary"))
+def test_entropy_chunks_preserve_fp32_full_vocabulary_values_and_inputs(
+    monkeypatch, dtype, layout,
+):
+    generator = torch.Generator().manual_seed(314)
+    logits = (torch.randn((3, 97, 257), generator=generator) * 4).to(dtype)
+    logits[..., ::13] = -torch.inf
+    # A deterministic distribution in a later chunk must have defined zero entropy.
+    logits[2, 80] = -torch.inf
+    logits[2, 80, 24] = 0.0
+    if layout == "transposed":
+        logits = logits.transpose(0, 1)
+    elif layout == "strided_vocabulary":
+        logits = logits[..., ::2]
+    if layout != "contiguous":
+        assert not logits.is_contiguous()
+    before = logits.clone()
+    expected = _manual_entropy(logits)
+    original = F.log_softmax
+    observed_rows = []
+
+    def bounded_fp32_log_softmax(values, *args, **kwargs):
+        rows = values.numel() // values.shape[-1]
+        observed_rows.append(rows)
+        assert 0 < rows <= 64
+        assert values.dtype == torch.float32
+        assert values.shape[-1] == logits.shape[-1]
+        return original(values, *args, **kwargs)
+
+    monkeypatch.setattr(F, "log_softmax", bounded_fp32_log_softmax)
+    actual = entropy_per_token(logits)
+
+    assert sum(observed_rows) == 3 * 97
+    assert len(observed_rows) > 1
+    assert actual.shape == logits.shape[:-1]
+    assert actual.dtype == torch.float32
+    assert actual.device == logits.device
+    assert torch.isfinite(actual).all()
+    assert torch.equal(logits, before)
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    deterministic_position = (80, 2) if layout == "transposed" else (2, 80)
+    assert actual[deterministic_position].item() == 0.0
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    (
+        ("nan", "NaN or positive infinity"),
+        ("positive_infinity", "NaN or positive infinity"),
+        ("all_suppressed", "at least one finite logit"),
+    ),
+)
+def test_entropy_rejects_invalid_logits_in_later_chunks(invalid, message):
+    logits = torch.zeros((2, 97, 7), dtype=torch.bfloat16)
+    if invalid == "all_suppressed":
+        logits[1, 80] = -torch.inf
+    else:
+        logits[1, 80, 3] = torch.nan if invalid == "nan" else torch.inf
+
+    with pytest.raises(ValueError, match=message):
+        entropy_per_token(logits)
+
+
+def test_entropy_retains_invalid_logit_precedence_across_chunks():
+    logits = torch.zeros((2, 97, 7))
+    logits[0, 0] = -torch.inf
+    logits[1, 80, 3] = torch.nan
+
+    with pytest.raises(ValueError, match="NaN or positive infinity"):
+        entropy_per_token(logits)
+
+
+@pytest.mark.parametrize("shape", ((0, 97, 7), (2, 0, 7), (0, 7)))
+def test_entropy_preserves_empty_leading_dimensions(shape):
+    logits = torch.empty(shape, dtype=torch.bfloat16)
+
+    actual = entropy_per_token(logits)
+
+    assert actual.shape == shape[:-1]
+    assert actual.numel() == 0
+    assert actual.dtype == torch.float32
+    assert actual.device == logits.device
+
+
+def test_entropy_chunking_preserves_finite_logits_gradients():
+    generator = torch.Generator().manual_seed(72)
+    logits = torch.randn((2, 81, 17), generator=generator, requires_grad=True)
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    weights = torch.linspace(0.2, 1.2, 2 * 81).reshape(2, 81)
+
+    actual = entropy_per_token(logits)
+    expected = _manual_entropy(reference_logits)
+    actual_gradient, = torch.autograd.grad((actual * weights).sum(), logits)
+    expected_gradient, = torch.autograd.grad(
+        (expected * weights).sum(), reference_logits,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(
+        actual_gradient, expected_gradient, atol=2e-6, rtol=1e-5,
+    )
 
 
 def test_heldout_mask_excludes_only_the_revealed_active_position():

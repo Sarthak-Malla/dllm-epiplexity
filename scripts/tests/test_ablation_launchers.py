@@ -1,9 +1,9 @@
 """Validate configuration-only path-selection ablation launchers.
 
-Run from any directory with:
+Run on a compute node with:
     source /home/sarthak.malla/.zshrc 2>/dev/null || source /apps/local/conda_init.sh
     conda activate /home/sarthak.malla/.conda/envs/dllm
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_ablation_launchers.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --cpus-per-task=2 --time=00:30:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_ablation_launchers.py -v
 """
 
 import os
@@ -60,7 +60,28 @@ def test_shared_runner_keeps_four_candidates_as_the_default():
 
     assert "candidate_budget=${PATH_ABLATION_CANDIDATE_BUDGET:-4}" in contents
     assert "candidate_budget=${candidate_budget}" in contents
-    assert "candidate_chunk_size=1" in contents
+    assert "candidate_chunk_size=${PATH_ABLATION_CANDIDATE_CHUNK_SIZE:-1}" in contents
+    assert "candidate_chunk_size=${candidate_chunk_size}" in contents
+
+
+def test_ie_maxconf_diagnostics_launcher_keeps_algorithm_and_isolates_outputs():
+    launcher = SHARED_RUNNER.parent / "run_gsm8k_ie_maxconf_n4_diagnostics.slurm.sh"
+    result = _dry_run(launcher)
+    assert result.returncode == 0, result.stderr
+    for argument in (
+        "sampler_type=max_confidence", "candidate_budget=4,",
+        "dependency_seed_strategy=incoming", "dependency_seed_entropy_weight=1.0",
+        "dependency_confidence_exponent=0.0", "dependency_entropy_budget=2.0",
+        "dependency_max_action_size=64", "temperature=0.0", "block_size=64",
+        "diagnostic_metadata=true", "diagnostic_retention=full",
+    ):
+        assert argument in result.stdout
+    assert "max_confidence_ie_diagnostics_v1/gsm8k_cot/max_confidence/diagnostics/" in result.stdout
+    assert "Response caching disabled" in result.stdout
+    assert "Evaluation limit: full" in result.stdout
+    limited = _dry_run(launcher, PATH_ABLATION_LIMIT="8")
+    assert limited.returncode == 0, limited.stderr
+    assert "/limit8/" in limited.stdout
 
 
 def test_existing_ablation2_launchers_do_not_override_candidate_budget():
@@ -116,6 +137,128 @@ def test_entropy_budget_arguments_and_output_paths_are_preserved(
     cap = "" if maximum_size == "64" else "max8/"
     assert f"gsm8k_cot/{cap}entropy_budget{budget}/seed42/results.json" in contents
     assert f"entropy-budget{budget}-s42" in contents
+
+
+@pytest.mark.parametrize("launcher,count", [(ABLATION2_LAUNCHERS[1], 4), (ABLATION3_LAUNCHER, 8)])
+@pytest.mark.parametrize("strategy,weight", [("incoming", "0.0"), ("incoming", "1.0"), ("confidence", "0.0")])
+def test_corrected_seed_parallel_runs_isolate_caches_and_preserve_other_model_settings(
+    launcher, count, strategy, weight
+):
+    overrides = {"PATH_ABLATION_CANDIDATE_CHUNK_SIZE": str(count)}
+    legacy = _dry_run(launcher, **overrides)
+    corrected = _dry_run(
+        launcher,
+        **overrides,
+        PATH_ABLATION_SEED_STRATEGY=strategy,
+        PATH_ABLATION_SEED_ENTROPY_WEIGHT=weight,
+    )
+    assert legacy.returncode == 0, legacy.stderr
+    assert corrected.returncode == 0, corrected.stderr
+
+    def model_arguments(output):
+        line = next(line for line in output.splitlines() if line.startswith("Model arguments: "))
+        return dict(argument.split("=", 1) for argument in line.removeprefix("Model arguments: ").split(","))
+
+    expected = model_arguments(legacy.stdout)
+    assert expected["dependency_seed_strategy"] == "legacy"
+    assert expected["dependency_seed_entropy_weight"] == "0.0"
+    expected.update(dependency_seed_strategy=strategy, dependency_seed_entropy_weight=weight)
+    assert model_arguments(corrected.stdout) == expected
+    assert expected["candidate_budget"] == expected["candidate_chunk_size"] == str(count)
+    assert expected["dependency_entropy_budget"] == "2.0"
+    assert expected["dependency_max_action_size"] == "64"
+    assert expected["dependency_confidence_exponent"] == "0.0"
+
+    path_suffix = (
+        f"gsm8k_cot/seed_{strategy}_entropy{weight}/entropy_budget2.0"
+        f"/candidates{count}/chunk{count}/seed42"
+    )
+    assert f"{path_suffix}/results.json" in corrected.stdout
+    assert f"{path_suffix}/responses.cache" in corrected.stdout
+    assert path_suffix not in legacy.stdout
+    assert f"-seed-{strategy}-entropy{weight}-entropy-budget2.0-n{count}-chunk{count}-s42" in corrected.stdout
+    wandb_config = next(line for line in corrected.stdout.splitlines() if line.startswith("W&B configuration: "))
+    assert f"dependency_seed_strategy={strategy},dependency_seed_entropy_weight={weight}" in wandb_config
+
+
+@pytest.mark.parametrize("strategy,weight", [
+    ("unknown", "0.0"), ("legacy", "1.0"), ("confidence", "1.0"),
+    ("incoming", "-1"), ("incoming", "nan"), ("incoming", "1.0,other=1"),
+])
+def test_corrected_seed_launcher_rejects_invalid_settings(strategy, weight):
+    result = _dry_run(
+        ABLATION2_LAUNCHERS[1],
+        PATH_ABLATION_SEED_STRATEGY=strategy,
+        PATH_ABLATION_SEED_ENTROPY_WEIGHT=weight,
+    )
+    assert result.returncode == 2
+    assert "PATH_ABLATION_SEED_" in result.stderr
+
+
+def test_corrected_sequential_candidate_counts_use_separate_response_caches():
+    for count in (4, 8):
+        result = _dry_run(
+            ABLATION2_LAUNCHERS[1],
+            PATH_ABLATION_CANDIDATE_BUDGET=str(count),
+            PATH_ABLATION_CANDIDATE_CHUNK_SIZE="1",
+            PATH_ABLATION_SEED_STRATEGY="incoming",
+            PATH_ABLATION_SEED_ENTROPY_WEIGHT="1.0",
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"/candidates{count}/chunk1/seed42/responses.cache" in result.stdout
+        assert f"-n{count}-chunk1-s42" in result.stdout
+
+
+@pytest.mark.parametrize("launcher,count", [(ABLATION2_LAUNCHERS[1], 4), (ABLATION3_LAUNCHER, 8)])
+def test_max_confidence_uses_no_lookahead_and_preserves_ie_entropy_budget(launcher, count):
+    result = _dry_run(
+        launcher,
+        PATH_ABLATION_SAMPLER_TYPE="max_confidence",
+        PATH_ABLATION_SEED_STRATEGY="incoming",
+        PATH_ABLATION_SEED_ENTROPY_WEIGHT="1.0",
+        # A previous parallel-run override must not create false batching labels.
+        PATH_ABLATION_CANDIDATE_CHUNK_SIZE=str(count),
+    )
+    assert result.returncode == 0, result.stderr
+    for argument in (
+        "sampler_type=max_confidence",
+        "dependency_candidate_selector=max_confidence",
+        "diagnostic_metadata=false",
+        "diagnostic_retention=none",
+        f"candidate_budget={count},candidate_chunk_size=1",
+        "dependency_seed_strategy=incoming,dependency_seed_entropy_weight=1.0",
+        "dependency_cardinality_strategy=entropy_budget",
+        "dependency_entropy_budget=2.0",
+        "dependency_max_action_size=64",
+        "dependency_direction=outgoing",
+        "dependency_confidence_exponent=0.0",
+    ):
+        assert argument in result.stdout
+    path_suffix = (
+        "gsm8k_cot/max_confidence/seed_incoming_entropy1.0"
+        f"/entropy_budget2.0/candidates{count}/seed42"
+    )
+    assert f"{path_suffix}/responses.cache" in result.stdout
+    assert f"{path_suffix}/results.json_max_confidence_runtime.json" in result.stdout
+    assert "selector=max_confidence,lookahead=false" in result.stdout
+    assert "Candidate chunk size: not used (no lookahead)" in result.stdout
+    assert "/chunk" not in result.stdout
+    assert "-max-confidence-uncapped-seed-incoming-entropy1.0-entropy-budget2.0" in result.stdout
+    assert f"-n{count}-s42" in result.stdout
+    assert "_entropy_drop_runtime.json" not in result.stdout
+
+
+@pytest.mark.parametrize("overrides", [
+    {"PATH_ABLATION_SAMPLER_TYPE": "unknown"},
+    {
+        "PATH_ABLATION_SAMPLER_TYPE": "max_confidence",
+        "PATH_ABLATION_CARDINALITY_STRATEGY": "marginal_utility",
+    },
+])
+def test_shared_runner_rejects_unsupported_sampler_settings(overrides):
+    result = _dry_run(ABLATION2_LAUNCHERS[1], **overrides)
+    assert result.returncode == 2
+    assert "PATH_ABLATION_SAMPLER_TYPE" in result.stderr
 
 
 @pytest.mark.parametrize("threshold", ("0", "0.0", "0.25", "0.5"))

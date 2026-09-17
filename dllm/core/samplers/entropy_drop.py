@@ -22,6 +22,7 @@ from dllm.core.samplers.counterfactual import entropy_per_token
 from dllm.core.samplers.dependency_guided import (
     DependencyGuidedSamplerConfig,
     build_dependency_candidates,
+    build_non_lookahead_step_diagnostics,
     build_step_diagnostics,
     is_fixed_k_strategy,
     release_dependency_capture_tensors,
@@ -275,11 +276,6 @@ class EntropyDropSampler(MDLMSampler):
                     "Non-lookahead candidate selection requires "
                     "dependency_cardinality_strategy='scheduler' or "
                     "'entropy_budget'."
-                )
-            if diagnostic_metadata:
-                raise ValueError(
-                    "Non-lookahead candidate selection currently requires "
-                    "diagnostic_metadata=False."
                 )
 
         assert 1 <= block_size
@@ -546,35 +542,46 @@ class EntropyDropSampler(MDLMSampler):
                         anchor_state_after = None
                     if diagnostics is not None:
                         if selection is None:
-                            raise RuntimeError(
-                                "Lookahead diagnostics require an entropy-drop "
-                                "selection result."
+                            step_diagnostics = build_non_lookahead_step_diagnostics(
+                                simple_selection,
+                                base_forward,
+                                config=config,
+                                confidence=x0_p,
+                                entropy=base_entropy_map,
+                                predicted_token_ids=x0,
+                                masked_active_mask=mask_index,
+                                response_mask=response_mask,
+                                block_index=b,
+                                step_index=i,
+                                global_step_index=global_step_index,
+                                generation_seed=step_seed,
                             )
-                        step_diagnostics = build_step_diagnostics(
-                            selection,
-                            base_forward,
-                            config=config,
-                            metric="entropy_drop",
-                            masked_active_mask=mask_index,
-                            response_mask=response_mask,
-                            block_index=b,
-                            step_index=i,
-                            global_step_index=global_step_index,
-                            generation_seed=step_seed,
-                            base_metric_map=base_entropy_map,
-                            predicted_token_ids=x0,
-                            anchor_state_before=anchor_state_before,
-                            anchor_state_after=anchor_state_after,
-                        )
+                        else:
+                            step_diagnostics = build_step_diagnostics(
+                                selection,
+                                base_forward,
+                                config=config,
+                                metric="entropy_drop",
+                                masked_active_mask=mask_index,
+                                response_mask=response_mask,
+                                block_index=b,
+                                step_index=i,
+                                global_step_index=global_step_index,
+                                generation_seed=step_seed,
+                                base_metric_map=base_entropy_map,
+                                predicted_token_ids=x0,
+                                anchor_state_before=anchor_state_before,
+                                anchor_state_after=anchor_state_after,
+                            )
                         for batch_index, record in enumerate(step_diagnostics):
                             diagnostics[batch_index].append(record)
                     anchor_state = anchor_state_after
                 
                 # Track selected candidates per example
-                for b in range(B):
-                    if best_candidate_names[b]:  # Only add if non-empty
-                        if best_candidate_names[b] not in selected_candidates[b]:
-                            selected_candidates[b].append(best_candidate_names[b])
+                for batch_index in range(B):
+                    if best_candidate_names[batch_index]:  # Only add if non-empty
+                        if best_candidate_names[batch_index] not in selected_candidates[batch_index]:
+                            selected_candidates[batch_index].append(best_candidate_names[batch_index])
                 
                 # Apply the best candidate
                 x[best_c_idx] = x0[best_c_idx]

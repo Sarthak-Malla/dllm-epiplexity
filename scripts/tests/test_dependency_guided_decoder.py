@@ -1,10 +1,10 @@
-"""Test fixed-k dependency decoding on a tiny CPU LLaDA.
+"""Test fixed-k and adaptive dependency decoding on a tiny CPU LLaDA.
 
-Run with:
-    source /apps/local/conda_init.sh
+Run on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_dependency_guided_decoder.py -v
 """
 
 import math
@@ -15,6 +15,7 @@ import torch
 
 from dllm.core.samplers.dependency import resolve_llada_attention_structure
 from dllm.core.samplers import dependency_guided as guided_module
+from dllm.core.samplers import entropy_drop as entropy_module
 from dllm.core.samplers.dependency_non_lookahead import (
     DependencyNonLookaheadSampler,
     DependencyNonLookaheadSamplerConfig,
@@ -144,13 +145,103 @@ def test_seed_controls_reach_candidate_generation_and_diagnostics(monkeypatch, s
     {"dependency_seed_strategy": "unknown"},
     {"dependency_seed_strategy": "confidence", "dependency_seed_entropy_weight": 1.0},
     {"dependency_seed_strategy": "incoming", "dependency_commit_k": 1},
-    {"dependency_seed_strategy": "incoming", "dependency_cardinality_strategy": "entropy_budget"},
+    {"dependency_seed_strategy": "incoming", "dependency_cardinality_strategy": "joint_k"},
+    {"dependency_seed_strategy": "incoming", "dependency_cardinality_strategy": "scheduler"},
+    {"dependency_seed_strategy": "incoming", "proposal_strategy": "baseline_confidence_gumbel"},
 ])
 def test_seed_controls_reject_unsupported_paths(overrides):
     settings = dict(proposal_strategy="dependency", dependency_commit_k=4, dependency_size_scoring="per_token")
     settings.update(overrides)
     with pytest.raises(ValueError):
         validate_dependency_guided_config(DependencyGuidedSamplerConfig(**settings))
+
+
+@pytest.mark.parametrize("cardinality", ("entropy_budget", "marginal_utility"))
+@pytest.mark.parametrize("commit_k", (1, 4))
+@pytest.mark.parametrize("strategy,weight", (("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0)))
+def test_adaptive_seed_controls_accept_corrected_policies_independent_of_fixed_k(
+    cardinality, commit_k, strategy, weight,
+):
+    validate_dependency_guided_config(
+        DependencyGuidedSamplerConfig(
+            proposal_strategy="dependency",
+            dependency_cardinality_strategy=cardinality,
+            dependency_commit_k=commit_k,
+            dependency_seed_strategy=strategy,
+            dependency_seed_entropy_weight=weight,
+            dependency_size_scoring="per_token",
+            candidate_chunk_size=4,
+        )
+    )
+
+
+@pytest.mark.parametrize("strategy,weight", (("incoming", 0.0), ("incoming", 1.0), ("confidence", 0.0)))
+def test_entropy_budget_seed_overrides_reach_generation_and_parallel_lookahead(
+    monkeypatch, strategy, weight,
+):
+    original = guided_module.generate_stopped_soft_full_candidates
+    generated = []
+
+    def capture(*args, **kwargs):
+        candidates = original(*args, **kwargs)
+        generated.append((kwargs, candidates))
+        return candidates
+
+    monkeypatch.setattr(guided_module, "generate_stopped_soft_full_candidates", capture)
+    sampler = EntropyDropSampler(model=_make_tiny_llada(), tokenizer=_tokenizer())
+    config = EntropyDropSamplerConfig(
+        max_new_tokens=4,
+        block_size=4,
+        steps=4,
+        temperature=0.0,
+        return_dict=True,
+        proposal_strategy="dependency",
+        candidate_budget=4,
+        candidate_chunk_size=4,
+        dependency_commit_k=1,
+        dependency_last_n_layers=2,
+        dependency_sink_filter_enabled=False,
+        dependency_direction="outgoing",
+        dependency_confidence_exponent=0.0,
+        dependency_position_temperature=0.0,
+        dependency_cardinality_strategy="entropy_budget",
+        dependency_max_action_size=4,
+        dependency_entropy_budget=2.0,
+        dependency_size_scoring="per_token",
+        diagnostic_metadata=True,
+    )
+
+    output = sampler.sample(
+        [[3, 4]], config=config,
+        dependency_seed_strategy=strategy,
+        dependency_seed_entropy_weight=weight,
+    )
+
+    assert not torch.any(output.sequences[:, 2:] == _tokenizer().mask_token_id)
+    assert output.diagnostics is not None
+    records = output.diagnostics[0]
+    assert len(generated) == len(records) > 0
+    assert records[0]["candidate_count_realized"] == 4
+    assert sum(record["commit_k"] for record in records) == 4
+    for (call, candidates), record in zip(generated, records):
+        assert call["seed_strategy"] == strategy
+        assert call["seed_entropy_weight"] == weight
+        assert call["stopping_rule"] == "entropy_budget"
+        assert call["entropy_budget"] == 2.0
+        assert call["direction"] == "outgoing"
+        assert call["confidence_exponent"] == 0.0
+        assert candidates.configuration["seed_strategy"] == strategy
+        assert candidates.configuration["seed_entropy_weight"] == weight
+        assert record["dependency_seed_strategy"] == strategy
+        assert record["dependency_seed_entropy_weight"] == weight
+        assert record["cardinality_strategy"] == "entropy_budget"
+        assert record["entropy_budget"] == 2.0
+        assert record["candidate_chunk_size"] == 4
+        assert record["lookahead_model_calls"] == 1
+        assert record["selected_candidate"]["action_size"] == record["commit_k"]
+        for candidate in record["candidates"]:
+            if candidate["valid"]:
+                assert candidate["seed_position"] in candidate["positions"]
 
 
 @pytest.mark.parametrize(
@@ -704,6 +795,131 @@ def test_non_lookahead_dependency_selector_uses_only_base_forwards(
     assert 1 <= forward_calls <= 4
     assert output.selected_candidates
     assert not torch.any(output.sequences[:, 2:] == _tokenizer().mask_token_id)
+
+
+@pytest.mark.parametrize("candidate_budget", (4, 8))
+@pytest.mark.parametrize("diagnostic_metadata", (False, True))
+def test_corrected_entropy_budget_max_confidence_uses_one_forward_per_action(
+    monkeypatch, candidate_budget, diagnostic_metadata,
+):
+    model = _make_tiny_llada()
+    original = guided_module.generate_stopped_soft_full_candidates
+    generated = []
+    forward_calls = 0
+
+    def capture_candidates(*args, **kwargs):
+        candidates = original(*args, **kwargs)
+        generated.append((kwargs, candidates))
+        return candidates
+
+    def count_forward_calls(_module, _inputs, _output):
+        nonlocal forward_calls
+        forward_calls += 1
+
+    def reject_verifier(*args, **kwargs):
+        pytest.fail("Maximum-confidence selection must not run a lookahead verifier.")
+
+    monkeypatch.setattr(
+        guided_module, "generate_stopped_soft_full_candidates", capture_candidates,
+    )
+    monkeypatch.setattr(guided_module, "evaluate_batched_lookahead", reject_verifier)
+    monkeypatch.setattr(entropy_module, "evaluate_batched_lookahead", reject_verifier)
+    monkeypatch.setattr(entropy_module, "select_fixed_k_candidate", reject_verifier)
+    hook = model.register_forward_hook(count_forward_calls)
+    sampler = DependencyNonLookaheadSampler(model=model, tokenizer=_tokenizer())
+    config = DependencyNonLookaheadSamplerConfig(
+        max_new_tokens=8,
+        block_size=8,
+        steps=8,
+        temperature=0.0,
+        return_dict=True,
+        proposal_strategy="dependency",
+        candidate_budget=candidate_budget,
+        candidate_chunk_size=candidate_budget,
+        dependency_commit_k=1,
+        dependency_last_n_layers=2,
+        dependency_position_temperature=0.0,
+        dependency_sink_filter_enabled=False,
+        dependency_seed_strategy="incoming",
+        dependency_seed_entropy_weight=1.0,
+        dependency_cardinality_strategy="entropy_budget",
+        dependency_max_action_size=8,
+        dependency_entropy_budget=2.0,
+        dependency_size_scoring="per_token",
+        dependency_candidate_selector="max_confidence",
+        diagnostic_metadata=diagnostic_metadata,
+    )
+
+    try:
+        output = sampler.sample([[3, 4]], config=config)
+    finally:
+        hook.remove()
+
+    assert output.histories is not None
+    assert forward_calls == len(generated) == len(output.histories) - 1
+    assert 1 <= forward_calls <= 8
+    assert generated[0][1].candidate_valid[:, 0].sum().item() == candidate_budget
+    for call, candidates in generated:
+        assert call["seed_strategy"] == "incoming"
+        assert call["seed_entropy_weight"] == 1.0
+        assert call["stopping_rule"] == "entropy_budget"
+        assert call["entropy_budget"] == 2.0
+        assert call["maximum_action_size"] == 8
+        assert call["candidate_budget"] == candidate_budget
+        assert candidates.configuration["seed_strategy"] == "incoming"
+        assert candidates.configuration["seed_entropy_weight"] == 1.0
+    committed_counts = [
+        (before != after).sum().item()
+        for before, after in zip(output.histories, output.histories[1:])
+    ]
+    assert all(count >= 1 for count in committed_counts)
+    assert sum(committed_counts) == 8
+    assert not torch.any(output.sequences[:, 2:] == _tokenizer().mask_token_id)
+    if not diagnostic_metadata:
+        assert output.diagnostics is None
+    else:
+        import json
+
+        records = output.diagnostics[0]
+        assert len(records) == forward_calls
+        assert sum(record["model_calls"] for record in records) == forward_calls
+        assert sum(record["lookahead_model_calls"] for record in records) == 0
+        assert [record["commit_k"] for record in records] == committed_counts
+        for step, record in enumerate(records):
+            selected = record["selected_candidate"]
+            positions = selected["positions"]
+            assert selected["token_ids"] == output.histories[step + 1][0, positions].tolist()
+            assert selected["selection_score"] == max(
+                candidate["selection_score"] for candidate in record["candidates"]
+            )
+            for candidate in record["candidates"]:
+                assert candidate["mean_confidence"] == pytest.approx(candidate["selection_score"])
+                assert candidate["entropy_sum"] >= 0
+                assert candidate["seed_position"] in candidate["positions"]
+                assert candidate["action_size"] == len(candidate["positions"])
+        json.dumps(records, allow_nan=False)
+        reference = sampler.sample([[3, 4]], config=config, diagnostic_metadata=False)
+        assert torch.equal(output.sequences, reference.sequences)
+        assert len(output.histories) == len(reference.histories)
+        assert all(torch.equal(a, b) for a, b in zip(output.histories, reference.histories))
+
+
+def test_non_lookahead_diagnostics_preserve_stochastic_path_and_block_labels():
+    sampler = DependencyNonLookaheadSampler(model=_make_tiny_llada(), tokenizer=_tokenizer())
+    config = DependencyNonLookaheadSamplerConfig(
+        max_new_tokens=8, block_size=4, steps=4, temperature=0.0,
+        return_dict=True, candidate_budget=4, dependency_last_n_layers=2,
+        dependency_max_action_size=4, dependency_entropy_budget=0.0,
+        dependency_position_temperature=1.0, dependency_seed_strategy="incoming",
+        dependency_seed_entropy_weight=1.0, diagnostic_metadata=True,
+    )
+    instrumented = sampler.sample([[3, 4]], config=config)
+    reference = sampler.sample([[3, 4]], config=config, diagnostic_metadata=False)
+    assert [step["block_index"] for step in instrumented.diagnostics[0]] == [0] * 4 + [1] * 4
+    assert [step["global_step_index"] for step in instrumented.diagnostics[0]] == list(range(8))
+    assert [step["generation_seed"] for step in instrumented.diagnostics[0]] == list(range(42, 50))
+    assert len(instrumented.histories) == len(reference.histories)
+    assert all(torch.equal(a, b) for a, b in zip(instrumented.histories, reference.histories))
 
 
 def test_entropy_budget_path_is_wired_into_decoder_and_guarantees_progress():

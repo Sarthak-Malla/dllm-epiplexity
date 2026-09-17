@@ -270,8 +270,12 @@ Implementation controls:
 - `dependency_seed_strategy=incoming|confidence`; default `legacy` preserves the
   original seed behavior, including its anchor support.
 - `dependency_seed_entropy_weight=0.0|1.0`; nonzero is allowed only with incoming
-  seeds. Custom seed policies are supported for fixed dependency groups with k>1;
-  other decoding paths reject them rather than silently ignoring the setting.
+  seeds. Custom seed policies are supported for fixed dependency groups with k>1
+  and for entropy-budget or marginal-utility stopping. Other decoding paths
+  reject them rather than silently ignoring the setting. The
+  [uncapped entropy-budget rerun](/home/sarthak.malla/dllm-selection-ensemble/examples/path_selection/ablation/2_entropy_budget_without_k_limit/README.md#parallel-candidate-lookahead-entropy-budget-20-n4-or-n8)
+  uses the same seed-scoring implementation while retaining its own companion
+  settings.
 - The first seed is deterministic; later seeds use the existing Gumbel ordering
   at position temperature 1.0. Score scale changes its effective randomness, so
   these runs test the full seed policy, not only the first seed's ranking.

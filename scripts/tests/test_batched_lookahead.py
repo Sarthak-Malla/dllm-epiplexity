@@ -1,11 +1,10 @@
 """Test candidate-major state expansion and shared batched lookahead scoring.
 
-Run with:
-    source /apps/local/conda_init.sh
+Run on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    TEST_ROOT=/home/sarthak.malla/dllm-selection-ensemble/scripts/tests
-    pytest "${TEST_ROOT}/test_batched_lookahead.py" -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_batched_lookahead.py -v
 """
 
 from types import SimpleNamespace
@@ -370,6 +369,69 @@ def test_batched_scores_and_selection_match_independent_sequential_reference(
             result.best_mask[batch_index],
             candidates.candidate_masks[candidate_index, batch_index],
         )
+
+
+@pytest.mark.parametrize("candidate_budget", (4, 8))
+@pytest.mark.parametrize("output_dtype", (torch.float32, torch.bfloat16, torch.float16))
+def test_entropy_row_chunking_preserves_parallel_forward_and_heldout_winner(
+    candidate_budget, output_dtype,
+):
+    # Each candidate has more than 64 token rows. Entropy reduction may chunk
+    # those rows, while the model must still see all N candidate states at once.
+    sequence_length = 81
+    input_ids = (torch.arange(sequence_length) % 17).unsqueeze(0)
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:, -5:] = 0
+    input_ids[:, -5:] = 0
+    active_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+    active_mask[:, 2:13] = True
+    input_ids[active_mask] = 19
+    confidence = torch.linspace(0.1, 0.9, sequence_length).unsqueeze(0)
+    candidates = generate_top_confidence_candidates(
+        confidence, active_mask, candidate_budget=candidate_budget,
+    )
+    model = ContextModel(vocabulary_size=17, output_dtype=output_dtype)
+    base_logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+    predicted_token_ids = base_logits.argmax(dim=-1)
+    base_entropy = _manual_metric(base_logits, "entropy_drop")
+    reference = _sequential_reference(
+        model, input_ids, predicted_token_ids, attention_mask, active_mask,
+        candidates, base_entropy, "entropy_drop",
+    )
+    model.batch_sizes.clear()
+    model.seen_states.clear()
+    input_before = input_ids.clone()
+
+    result = evaluate_batched_lookahead(
+        model,
+        input_ids,
+        predicted_token_ids,
+        candidates,
+        base_metric_map=base_entropy,
+        metric="entropy_drop",
+        attention_mask=attention_mask,
+        masked_active_mask=active_mask,
+        candidate_chunk_size=candidate_budget,
+    )
+
+    scores, base_sums, lookahead_sums, best_index, best_score = reference
+    assert model.batch_sizes == [candidate_budget]
+    assert model.seen_states[0].shape == (candidate_budget, sequence_length)
+    assert result.model_calls == 1
+    assert result.candidate_chunk_size == candidate_budget
+    assert result.heldout_counts[:, 0].tolist() == [10] * candidate_budget
+    assert result.scores.dtype == torch.float32
+    assert torch.equal(input_ids, input_before)
+    torch.testing.assert_close(result.scores, scores, atol=2e-5, rtol=0)
+    torch.testing.assert_close(result.base_metric_sums, base_sums, atol=2e-5, rtol=0)
+    torch.testing.assert_close(
+        result.lookahead_metric_sums, lookahead_sums, atol=2e-5, rtol=0,
+    )
+    assert torch.equal(result.best_index, best_index)
+    torch.testing.assert_close(result.best_score, best_score, atol=2e-5, rtol=0)
+    winner = best_index[0].item()
+    assert result.best_names == (candidates.names[winner],)
+    assert torch.equal(result.best_mask, candidates.candidate_masks[winner])
 
 
 @pytest.mark.parametrize("metric", ["entropy_drop", "risk_reduction"])

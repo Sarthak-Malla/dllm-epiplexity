@@ -14,10 +14,14 @@ seed=42
 ablation_number=${PATH_ABLATION_NUMBER:-2}
 output_subdirectory=${PATH_ABLATION_OUTPUT_SUBDIRECTORY:-2_entropy_budget_without_k_limit}
 candidate_budget=${PATH_ABLATION_CANDIDATE_BUDGET:-4}
+candidate_chunk_size=${PATH_ABLATION_CANDIDATE_CHUNK_SIZE:-1}
+sampler_type=${PATH_ABLATION_SAMPLER_TYPE:-entropy_drop}
 cardinality_strategy=${PATH_ABLATION_CARDINALITY_STRATEGY:-entropy_budget}
 utility_threshold=${PATH_ABLATION_UTILITY_THRESHOLD:-0.0}
 token_temperature=${PATH_ABLATION_TOKEN_TEMPERATURE:-0.0}
 confidence_exponent=${PATH_ABLATION_CONFIDENCE_EXPONENT:-0.0}
+seed_strategy=${PATH_ABLATION_SEED_STRATEGY:-legacy}
+seed_entropy_weight=${PATH_ABLATION_SEED_ENTROPY_WEIGHT:-0.0}
 evaluation_limit=${PATH_ABLATION_LIMIT:-}
 entropy_budget=${ABLATION2_ENTROPY_BUDGET:-}
 block_size=64
@@ -29,6 +33,53 @@ wandb_project=${ABLATION2_WANDB_PROJECT:-dllm-selection-ensemble}
 wandb_entity=${ABLATION2_WANDB_ENTITY:-}
 wandb_group=${PATH_ABLATION_WANDB_GROUP:-ablation-2-entropy-budget-cap-comparison}
 wandb_name_prefix=${PATH_ABLATION_WANDB_NAME_PREFIX:-ablation-2}
+
+sampler_path=
+sampler_name=
+case "${sampler_type}" in
+    entropy_drop)
+        lookahead=true
+        diagnostic_metadata=true
+        diagnostic_retention=compact
+        ;;
+    max_confidence)
+        lookahead=false
+        diagnostic_metadata=false
+        diagnostic_retention=none
+        # No verifier forward is made, so candidate batching does not apply.
+        candidate_chunk_size=1
+        sampler_path=/max_confidence
+        sampler_name=-max-confidence
+        if [ "${cardinality_strategy}" != entropy_budget ]; then
+            echo "PATH_ABLATION_SAMPLER_TYPE=max_confidence requires entropy_budget cardinality" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "PATH_ABLATION_SAMPLER_TYPE must be entropy_drop or max_confidence" >&2
+        exit 2
+        ;;
+esac
+
+case "${PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS:-0}" in
+    0) ;;
+    1)
+        if [ "${lookahead}" != false ]; then
+            echo "PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS=1 requires max_confidence" >&2
+            exit 2
+        fi
+        diagnostic_metadata=true
+        # Preserve all candidate summaries, selected positions, and token IDs.
+        # No logits, Q/K tensors, or attention matrices are serialized.
+        diagnostic_retention=full
+        sampler_path=${sampler_path}/diagnostics
+        sampler_name=${sampler_name}-diagnostics
+        ;;
+    *)
+        echo "PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 
 case "${confidence_exponent}" in
     0|0.0) confidence_exponent=0.0 ;;
@@ -43,6 +94,33 @@ confidence_name=
 if [ -n "${PATH_ABLATION_CONFIDENCE_EXPONENT:-}" ]; then
     confidence_path=/confidence_exponent${confidence_exponent}
     confidence_name=-confidence${confidence_exponent}
+fi
+
+case "${seed_strategy}" in
+    legacy|incoming|confidence) ;;
+    *)
+        echo "PATH_ABLATION_SEED_STRATEGY must be legacy, incoming, or confidence" >&2
+        exit 2
+        ;;
+esac
+case "${seed_entropy_weight}" in
+    0|0.0) seed_entropy_weight=0.0 ;;
+    1|1.0) seed_entropy_weight=1.0 ;;
+    *)
+        echo "PATH_ABLATION_SEED_ENTROPY_WEIGHT must be 0.0 or 1.0" >&2
+        exit 2
+        ;;
+esac
+if [ "${seed_strategy}" != incoming ] && [ "${seed_entropy_weight}" != 0.0 ]; then
+    echo "PATH_ABLATION_SEED_ENTROPY_WEIGHT requires incoming seed strategy" >&2
+    exit 2
+fi
+# Keep legacy paths intact; corrected seed policies need separate cached responses.
+seed_policy_path=
+seed_policy_name=
+if [ "${seed_strategy}" != legacy ]; then
+    seed_policy_path=/seed_${seed_strategy}_entropy${seed_entropy_weight}
+    seed_policy_name=-seed-${seed_strategy}-entropy${seed_entropy_weight}
 fi
 
 evaluation_arguments=()
@@ -88,6 +166,21 @@ if [[ ! "${candidate_budget}" =~ ^[0-9]+$ ]] \
     || [ "${candidate_budget}" -gt 64 ]; then
     echo "PATH_ABLATION_CANDIDATE_BUDGET must be an integer from 1 to 64" >&2
     exit 2
+fi
+if [[ ! "${candidate_chunk_size}" =~ ^[1-9][0-9]*$ ]] \
+    || [ "${candidate_chunk_size}" -gt 64 ]; then
+    echo "PATH_ABLATION_CANDIDATE_CHUNK_SIZE must be an integer from 1 to 64" >&2
+    exit 2
+fi
+# Distinguish candidate counts for corrected seeds, including sequential controls.
+candidate_batch_path=
+candidate_batch_name=
+if [ "${lookahead}" = false ]; then
+    candidate_batch_path=/candidates${candidate_budget}
+    candidate_batch_name=-n${candidate_budget}
+elif [ "${candidate_chunk_size}" -ne 1 ] || [ "${seed_strategy}" != legacy ]; then
+    candidate_batch_path=/candidates${candidate_budget}/chunk${candidate_chunk_size}
+    candidate_batch_name=-n${candidate_budget}-chunk${candidate_chunk_size}
 fi
 
 case "${cardinality_strategy}" in
@@ -153,42 +246,62 @@ export WANDB_DIR=${repo}/.wandb
 output_root=${repo}/eval_results/path_selection/ablation/${output_subdirectory}
 if [ "${action_cap_label}" = uncapped ]; then
     # Preserve the original uncapped output layout for backwards compatibility.
-    run_directory=${output_root}/${run_tag}/${task}${confidence_path}/${stopping_label}${temperature_path}${limit_path}/seed${seed}
+    run_directory=${output_root}/${run_tag}/${task}${sampler_path}${confidence_path}${seed_policy_path}/${stopping_label}${temperature_path}${limit_path}${candidate_batch_path}/seed${seed}
 else
-    run_directory=${output_root}/${run_tag}/${task}${confidence_path}/${action_cap_label}/${stopping_label}${temperature_path}${limit_path}/seed${seed}
+    run_directory=${output_root}/${run_tag}/${task}${sampler_path}${confidence_path}${seed_policy_path}/${action_cap_label}/${stopping_label}${temperature_path}${limit_path}${candidate_batch_path}/seed${seed}
 fi
 output_path=${run_directory}/results.json
-completion_marker=${output_path}_entropy_drop_runtime.json
+completion_marker=${output_path}_${sampler_type}_runtime.json
 response_cache=${run_directory}/responses.cache
+response_cache_arguments=(--use_cache "${response_cache}")
+if [ "${PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS:-0}" = 1 ]; then
+    # Cache hits bypass the sampler and cannot reproduce per-step diagnostics.
+    response_cache_arguments=()
+fi
 
 # With maximum_action_size equal to the complete decoding block, there is no
 # separate k cap. Smaller values provide a hard safety cap in addition to the
 # configured stopping rule.
-model_args="pretrained=${checkpoint},dtype=bfloat16,load_in_4bit=false,max_length=4096,max_new_tokens=256,steps=64,block_size=${block_size},temperature=${token_temperature},cfg_scale=0.0,stochastic_transfer=false,return_dict=true,diagnostic_retention=compact,sampler_type=entropy_drop,proposal_strategy=dependency,candidate_budget=${candidate_budget},candidate_chunk_size=1,dependency_commit_k=1,dependency_parallel_variant=soft_full,dependency_cardinality_strategy=${cardinality_strategy},dependency_max_action_size=${maximum_action_size},${stopping_args},dependency_size_scoring=per_token,dependency_immediate_cost_weight=1.0,dependency_size_penalty=0.0,dependency_last_n_layers=4,dependency_direction=outgoing,dependency_target_weighting=entropy,dependency_position_temperature=1.0,dependency_confidence_exponent=${confidence_exponent},dependency_generation_seed=${seed},dependency_sink_filter_enabled=true,dependency_sink_quantile=0.99,dependency_zero_diagonal=true,dependency_renormalize_selected_keys=true,dependency_fallback_strategy=dependency_only,dependency_conflict_normalization=max,dependency_conflict_penalty=1.0,dependency_hard_conflict_threshold=0.25,dependency_anchor_support_weight=1.0,dependency_anchor_confidence_threshold=0.8,diagnostic_metadata=true"
+model_args="pretrained=${checkpoint},dtype=bfloat16,load_in_4bit=false,max_length=4096,max_new_tokens=256,steps=64,block_size=${block_size},temperature=${token_temperature},cfg_scale=0.0,stochastic_transfer=false,return_dict=true,diagnostic_retention=${diagnostic_retention},sampler_type=${sampler_type},proposal_strategy=dependency,candidate_budget=${candidate_budget},candidate_chunk_size=${candidate_chunk_size},dependency_commit_k=1,dependency_parallel_variant=soft_full,dependency_cardinality_strategy=${cardinality_strategy},dependency_max_action_size=${maximum_action_size},${stopping_args},dependency_size_scoring=per_token,dependency_immediate_cost_weight=1.0,dependency_size_penalty=0.0,dependency_last_n_layers=4,dependency_direction=outgoing,dependency_target_weighting=entropy,dependency_position_temperature=1.0,dependency_confidence_exponent=${confidence_exponent},dependency_generation_seed=${seed},dependency_sink_filter_enabled=true,dependency_sink_quantile=0.99,dependency_zero_diagonal=true,dependency_renormalize_selected_keys=true,dependency_fallback_strategy=dependency_only,dependency_conflict_normalization=max,dependency_conflict_penalty=1.0,dependency_hard_conflict_threshold=0.25,dependency_anchor_support_weight=1.0,dependency_anchor_confidence_threshold=0.8,diagnostic_metadata=${diagnostic_metadata}"
+model_args+=",dependency_seed_strategy=${seed_strategy},dependency_seed_entropy_weight=${seed_entropy_weight}"
+model_args+=",dependency_candidate_selector=${sampler_type}"
 
 wandb_arguments=()
-wandb_name=${wandb_name_prefix}-${task}-${action_cap_label}${confidence_name}-${stopping_name}${temperature_name}${limit_name}-s${seed}
+wandb_name=${wandb_name_prefix}-${task}${sampler_name}-${action_cap_label}${confidence_name}${seed_policy_name}-${stopping_name}${temperature_name}${limit_name}${candidate_batch_name}-s${seed}
 if [ "${wandb_mode}" != disabled ]; then
     wandb_init_args="project=${wandb_project},name=${wandb_name},group=${wandb_group},job_type=ablation,mode=${wandb_mode},dir=${WANDB_DIR}"
     if [ -n "${wandb_entity}" ]; then
         wandb_init_args="${wandb_init_args},entity=${wandb_entity}"
     fi
-    wandb_config_args="ablation=${ablation_number},task=${task},selector=entropy_drop,lookahead=true,proposal_strategy=dependency,candidate_budget=${candidate_budget},cardinality_strategy=${cardinality_strategy},${stopping_config},maximum_action_size=${maximum_action_size},size_scoring=per_token,seed=${seed},max_new_tokens=256,steps=64,block_size=${block_size},gpu_count=${num_gpu},run_tag=${run_tag}"
+    wandb_config_args="ablation=${ablation_number},task=${task},selector=${sampler_type},lookahead=${lookahead},proposal_strategy=dependency,candidate_budget=${candidate_budget},candidate_chunk_size=${candidate_chunk_size},cardinality_strategy=${cardinality_strategy},${stopping_config},maximum_action_size=${maximum_action_size},size_scoring=per_token,seed=${seed},max_new_tokens=256,steps=64,block_size=${block_size},gpu_count=${num_gpu},run_tag=${run_tag}"
     wandb_config_args+=",temperature=${token_temperature},dependency_position_temperature=1.0"
     wandb_config_args+=",dependency_confidence_exponent=${confidence_exponent},evaluation_limit=${evaluation_limit:-full}"
+    wandb_config_args+=",dependency_seed_strategy=${seed_strategy},dependency_seed_entropy_weight=${seed_entropy_weight}"
+    wandb_config_args+=",sampler_type=${sampler_type},diagnostic_metadata=${diagnostic_metadata},diagnostic_retention=${diagnostic_retention}"
     wandb_arguments+=(
         --wandb_args "${wandb_init_args}"
         --wandb_config_args "${wandb_config_args}"
     )
 fi
 
-echo "Starting ${cardinality_strategy}/entropy-drop action-cap ablation"
+echo "Starting ${cardinality_strategy}/${sampler_type} action-cap ablation"
 echo "Ablation: ${ablation_number}"
 echo "Task: ${task}"
 echo "Candidate count: ${candidate_budget}"
+echo "Sampler: ${sampler_type}; lookahead: ${lookahead}"
+echo "Diagnostics: ${diagnostic_metadata}; retention: ${diagnostic_retention}"
+if [ "${PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS:-0}" = 1 ]; then
+    echo "Response caching disabled so every example has a measured trajectory"
+fi
+if [ "${lookahead}" = true ]; then
+    echo "Candidate chunk size: ${candidate_chunk_size}"
+else
+    echo "Candidate chunk size: not used (no lookahead)"
+fi
 echo "Stopping configuration: ${stopping_config}"
 echo "Token generation temperature: ${token_temperature}"
 echo "Confidence exponent: ${confidence_exponent}"
+echo "Candidate seed strategy/own-entropy weight: ${seed_strategy}/${seed_entropy_weight}"
 echo "Evaluation limit: ${evaluation_limit:-full}"
 echo "Maximum action size/block size: ${maximum_action_size}/${block_size}"
 echo "Output: ${run_directory}"
@@ -197,6 +310,7 @@ if [ "${ABLATION2_DRY_RUN:-0}" = 1 ]; then
     echo "Model arguments: ${model_args}"
     echo "Output path: ${output_path}"
     echo "Response cache: ${response_cache}"
+    echo "Completion marker: ${completion_marker}"
     echo "W&B name: ${wandb_name}"
     echo "W&B configuration: ${wandb_config_args:-disabled}"
     echo "ABLATION2_DRY_RUN=1; launch skipped"
@@ -233,6 +347,21 @@ if [ "${ABLATION2_SKIP_COMPLETED:-1}" = 1 ] && [ -s "${completion_marker}" ]; th
     exit 0
 fi
 
+if [ "${PATH_ABLATION_NON_LOOKAHEAD_DIAGNOSTICS:-0}" = 1 ]; then
+    sha256sum \
+        "${repo}/dllm/core/samplers/entropy_drop.py" \
+        "${repo}/dllm/core/samplers/dependency_guided.py" \
+        "${repo}/dllm/core/samplers/dependency.py" \
+        "${repo}/dllm/core/samplers/candidates.py" \
+        "${repo}/dllm/core/samplers/parallel_candidates.py" \
+        "${repo}/dllm/core/samplers/adaptive_cardinality.py" \
+        "${repo}/dllm/core/samplers/non_lookahead.py" \
+        "${repo}/dllm/core/samplers/counterfactual.py" \
+        "${repo}/dllm/core/eval/decoding_summary.py" \
+        "${repo}/examples/path_selection/eval.py" \
+        > "${run_directory}/source_hashes.sha256"
+fi
+
 main_process_port=$((26000 + ${SLURM_JOB_ID:-0} % 14000))
 accelerate launch \
     --num_processes "${num_gpu}" \
@@ -253,6 +382,6 @@ accelerate launch \
         "${evaluation_arguments[@]}" \
         "${wandb_arguments[@]}" \
         --output_path "${output_path}" \
-        --use_cache "${response_cache}"
+        "${response_cache_arguments[@]}"
 
 echo "Ablation completed: ${task}/${action_cap_label}/${stopping_label}"

@@ -1,10 +1,10 @@
 """Construct and score adaptive-cardinality dependency actions.
 
-Run the focused CPU tests with:
-    source /apps/local/conda_init.sh
+Run the focused CPU tests on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
     export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
-    pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_adaptive_cardinality.py -v
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_adaptive_cardinality.py -v
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from dllm.core.samplers.parallel_candidates import (
     _validate_position_values,
     anchor_support_scores,
     build_symmetric_conflict_matrix,
+    dependency_seed_scores,
     generate_parallel_dependency_candidates,
     initialize_committed_anchor_state,
 )
@@ -295,6 +296,8 @@ def generate_stopped_soft_full_candidates(
     direction: str = "outgoing",
     target_weighting: str = "entropy",
     confidence_exponent: float = 0.0,
+    seed_strategy: str = "legacy",
+    seed_entropy_weight: float = 0.0,
     anchor_state: CommittedAnchorState | None = None,
     conflict_normalization: str = "max",
     conflict_penalty: float = 1.0,
@@ -303,7 +306,7 @@ def generate_stopped_soft_full_candidates(
     generation_seed: int = 0,
     name_prefix: str = "adaptive_candidate",
 ) -> CandidateBatch:
-    """Generate variable-size candidates using the frozen soft-full ordering."""
+    """Generate variable-size candidates with optional seed-only ranking rules."""
     (
         batch_size,
         query_count,
@@ -357,6 +360,15 @@ def generate_stopped_soft_full_candidates(
         )
     support = anchor_support_scores(dependency, eligible, anchor_state)
     utility = base_scores + float(anchor_support_weight) * support
+    seed_scores = dependency_seed_scores(
+        dependency,
+        entropy,
+        confidence,
+        eligible,
+        legacy_scores=utility,
+        seed_strategy=seed_strategy,
+        seed_entropy_weight=seed_entropy_weight,
+    )
     generator = torch.Generator(device="cpu")
     generator.manual_seed(generation_seed)
 
@@ -373,7 +385,7 @@ def generate_stopped_soft_full_candidates(
             continue
         target = min(candidate_budget, len(positions))
         seeds = _seed_order(
-            utility[batch_index],
+            seed_scores[batch_index],
             positions,
             position_temperature=float(position_temperature),
             generator=generator,
@@ -643,6 +655,10 @@ def generate_stopped_soft_full_candidates(
             "direction": direction,
             "target_weighting": target_weighting,
             "confidence_exponent": float(confidence_exponent),
+            "seed_strategy": seed_strategy,
+            "seed_entropy_weight": float(seed_entropy_weight),
+            "seed_anchor_support": "legacy" if seed_strategy == "legacy" else "none",
+            "refill_ranking": "legacy_companion_utility",
             "conflict_normalization": conflict_normalization,
             "conflict_scale_by_batch": tuple(
                 float(value) for value in conflict_output.scale_by_batch.tolist()

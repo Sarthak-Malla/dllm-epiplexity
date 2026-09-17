@@ -1,18 +1,23 @@
 """
 Evaluate one-position counterfactual entropy and risk reduction.
 
-Run the focused CPU tests with:
-    source /apps/local/conda_init.sh
+Run the focused CPU tests on a compute node with:
+    source /home/sarthak.malla/.zshrc
     conda activate /home/sarthak.malla/.conda/envs/dllm
-    TEST_ROOT=/home/sarthak.malla/dllm-selection-ensemble/scripts/tests
-    pytest "${TEST_ROOT}/test_counterfactual_oracle.py" -v
+    export PYTHONPATH=/home/sarthak.malla/dllm-selection-ensemble
+    srun -p "$PARTITION" --quotatype="$QUOTATYPE" --ntasks=1 --cpus-per-task=2 --time=00:15:00 python -m pytest /home/sarthak.malla/dllm-selection-ensemble/scripts/tests/test_counterfactual_oracle.py -v
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import product
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+_ENTROPY_ROW_CHUNK_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -71,27 +76,63 @@ def _validate_logits(
         raise ValueError(f"{name} has a position with no finite logits.")
 
 
+def _entropy_row_chunks(logits: torch.Tensor) -> Iterator[torch.Tensor]:
+    """Yield views with at most 64 token rows and the entire vocabulary.
+
+    Indexing the leading dimensions separately avoids a potentially full-size
+    copy when flattening noncontiguous logits.
+    """
+    prefix_ranges = (range(size) for size in logits.shape[:-2])
+    for prefix in product(*prefix_ranges):
+        token_logits = logits[prefix]
+        for start in range(0, token_logits.shape[0], _ENTROPY_ROW_CHUNK_SIZE):
+            yield token_logits[start : start + _ENTROPY_ROW_CHUNK_SIZE]
+
+
 def entropy_per_token(logits: torch.Tensor) -> torch.Tensor:
-    """Return float32 categorical entropy for logits shaped ``[..., V]``."""
+    """Return float32 categorical entropy for logits shaped ``[..., V]``.
+
+    Validation and FP32 arithmetic use at most 64 token rows at a time, without
+    changing model batches or dividing the vocabulary normalization. Inference
+    under ``no_grad`` therefore has bounded temporary workspace. Grad-enabled
+    callers retain the usual autograd intermediates needed for backward.
+    """
     if not isinstance(logits, torch.Tensor):
         raise TypeError("logits must be a torch.Tensor.")
     if logits.ndim < 2 or logits.shape[-1] <= 0:
         raise ValueError("logits must have shape [..., V] with nonempty V.")
     if not torch.is_floating_point(logits):
         raise TypeError("logits must have a floating-point dtype.")
-    if torch.isnan(logits).any() or torch.isposinf(logits).any():
+    if logits.numel() == 0:
+        return logits.sum(dim=-1, dtype=torch.float32)
+
+    has_invalid_values = torch.zeros((), dtype=torch.bool, device=logits.device)
+    has_empty_support = torch.zeros((), dtype=torch.bool, device=logits.device)
+    for row_logits in _entropy_row_chunks(logits):
+        has_invalid_values |= (
+            torch.isnan(row_logits).any() | torch.isposinf(row_logits).any()
+        )
+        has_empty_support |= torch.isneginf(row_logits).all(dim=-1).any()
+
+    # Check only the aggregated scalar flags, avoiding a device sync per chunk
+    # and preserving invalid-value precedence over rows with empty support.
+    if has_invalid_values:
         raise ValueError("logits must not contain NaN or positive infinity.")
-    if (~torch.isneginf(logits)).sum(dim=-1).eq(0).any():
+    if has_empty_support:
         raise ValueError("Each position must contain at least one finite logit.")
 
-    log_probabilities = F.log_softmax(logits.float(), dim=-1)
-    probabilities = log_probabilities.exp()
-    terms = torch.where(
-        probabilities > 0,
-        probabilities * log_probabilities,
-        torch.zeros_like(probabilities),
-    )
-    return -terms.sum(dim=-1)
+    entropy_chunks = []
+    for row_logits in _entropy_row_chunks(logits):
+        log_probabilities = F.log_softmax(row_logits.float(), dim=-1)
+        probabilities = log_probabilities.exp()
+        terms = torch.where(
+            probabilities > 0,
+            probabilities * log_probabilities,
+            torch.zeros_like(probabilities),
+        )
+        entropy_chunks.append(-terms.sum(dim=-1))
+        del log_probabilities, probabilities, terms
+    return torch.cat(entropy_chunks).reshape(logits.shape[:-1])
 
 
 def decoding_risk_per_token(logits: torch.Tensor) -> torch.Tensor:
