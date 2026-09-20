@@ -1,8 +1,11 @@
 """
+Use MDLMSampler(model, tokenizer).sample(inputs, MDLMSamplerConfig()).
+
 reference: https://github.com/ML-GSAI/LLaDA/blob/main/generate.py
 """
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +36,49 @@ class MDLMSamplerConfig(BaseSamplerConfig):
 
 @dataclass
 class MDLMSampler(BaseSampler):
+    # Optional observer of Python counts and per-row overlap/proposal counts.
+    # Decoding does not retain telemetry histories or expose tensors to observers.
+    step_callback: Callable[
+        [dict[str, int | dict[str, list[int]]]], None
+    ] | None = None
+
+    def _report_step(self, mask_index, x, block_index, mask_id, **metrics):
+        """Report batch totals after a forward/commit, using pre-step masks.
+
+        Remaining masks and active sequences refer to the current block. Count
+        actual reveals, so a proposed mask token does not count as a commit.
+        This helper is only called when step_callback is set.
+        """
+        remaining = x == mask_id
+        self.step_callback(
+            {
+                "tokens_committed": int((mask_index & ~remaining).sum().item()),
+                "remaining_masks": int((block_index & remaining).sum().item()),
+                "active_sequences": int(
+                    (block_index & mask_index).any(dim=-1).sum().item()
+                ),
+                **metrics,
+            }
+        )
+
+    def _score_positions(self, logits, predicted_ids, strategy):
+        """Return [batch, sequence] scores; larger means reveal earlier.
+
+        logits has shape [batch, sequence, vocabulary]; predicted_ids has shape
+        [batch, sequence] and includes the effect of token-prediction noise.
+        low_confidence scores the proposed token under the supplied logits.
+
+        Scores only rank positions. Token prediction, eligibility, and transfer
+        scheduling are handled by the decoding methods.
+        """
+        if strategy == "low_confidence":
+            p = F.softmax(logits, dim=-1)
+            return torch.gather(p, dim=-1, index=predicted_ids.unsqueeze(-1)).squeeze(-1)
+        elif strategy == "random":
+            return torch.rand(logits.shape[:-1], device=logits.device)
+        else:
+            raise NotImplementedError(strategy)
+
     @torch.no_grad()
     def sample(
         self,
@@ -136,12 +182,19 @@ class MDLMSampler(BaseSampler):
             block_mask_index = torch.zeros(
                 (B, block_size), dtype=torch.bool, device=x.device
             )
+            metrics_block_index = (
+                torch.zeros_like(x, dtype=torch.bool)
+                if self.step_callback is not None
+                else None
+            )
 
             for j in range(B):
                 start = prompt_lens[j] + b * block_size
                 end = min(start + block_size, prompt_lens[j] + max_new_tokens, T)
                 if start < end:
                     width = end - start
+                    if metrics_block_index is not None:
+                        metrics_block_index[j, start:end] = True
                     block_mask_index[j, :width] = (
                         x[j, start:end] == mask_id
                     )  # which positions in this block are still masked
@@ -194,17 +247,7 @@ class MDLMSampler(BaseSampler):
                         logits[:, :, token_id] = -torch.inf
 
                 # Per-position confidence used to pick which masks to commit this step
-                if remasking == "low_confidence":
-                    p = F.softmax(logits, dim=-1)
-                    x0_p = torch.squeeze(
-                        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                    )  # [B, T] confidence of predicted token
-                elif remasking == "random":
-                    x0_p = torch.rand(
-                        (x0.shape[0], x0.shape[1]), device=x0.device
-                    )  # random scores
-                else:
-                    raise NotImplementedError(remasking)
+                x0_p = self._score_positions(logits, x0, remasking)
 
                 # Restrict selection window to the *current block's* tail region
                 for j in range(B):
@@ -228,6 +271,8 @@ class MDLMSampler(BaseSampler):
 
                 # Commit chosen predictions into the canvas
                 x[transfer_index] = x0[transfer_index]
+                if self.step_callback is not None:
+                    self._report_step(mask_index, x, metrics_block_index, mask_id)
                 if histories is not None:
                     histories.append(x.clone())
 
@@ -330,12 +375,19 @@ class MDLMSampler(BaseSampler):
             block_mask_index = torch.zeros(
                 (B, block_size), dtype=torch.bool, device=self.model.device
             )
+            metrics_block_index = (
+                torch.zeros_like(x, dtype=torch.bool)
+                if self.step_callback is not None
+                else None
+            )
             widths = []
             for j in range(B):
                 # Width limited by sample's true length and sequence end
                 width = max(0, min(seq_lens[j], stop) - start)
                 widths.append(width)
                 if width > 0:
+                    if metrics_block_index is not None:
+                        metrics_block_index[j, start : start + width] = True
                     block_mask_index[j, :width] = x[j, start : start + width] == mask_id
 
             # Decide how many tokens to reveal at each step in this block
@@ -383,15 +435,7 @@ class MDLMSampler(BaseSampler):
                         logits[:, :, token_id] = -torch.inf
 
                 # Confidence used for choosing which masks to commit this step
-                if remasking == "low_confidence":
-                    p = F.softmax(logits, dim=-1)
-                    x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(
-                        -1
-                    )  # [B, T]
-                elif remasking == "random":
-                    x0_p = torch.rand((B, T), device=self.model.device)
-                else:
-                    raise NotImplementedError(remasking)
+                x0_p = self._score_positions(logits, x0, remasking)
 
                 # Restrict selection to the *current* block only
                 for j in range(B):
@@ -414,6 +458,8 @@ class MDLMSampler(BaseSampler):
 
                 # Commit selected predictions into the canvas
                 x[transfer_index] = x0[transfer_index]
+                if self.step_callback is not None:
+                    self._report_step(mask_index_full, x, metrics_block_index, mask_id)
                 if histories is not None:
                     histories.append(x.clone())
 
