@@ -11,11 +11,11 @@ TEMPERATURE="${TEMPERATURE:-0.0}"
 SUPPRESS_TOKENS="${SUPPRESS_TOKENS:-[]}"
 BEGIN_SUPPRESS_TOKENS="${BEGIN_SUPPRESS_TOKENS:-[]}"
 
-# Used only by the scheduled, single-strategy baselines.
+# Used by scheduled baselines and the all ensemble policy.
 STEPS="${STEPS:-64}"
-# Used only by scheduler-free ensembles. List items use the harness's semicolon syntax.
+# Used by all ensemble policies. List items use the harness's semicolon syntax.
 STRATEGIES="${STRATEGIES:-[low_confidence;min_entropy;max_top2_prob]}"
-# Proportion of currently remaining masks proposed at each decoding step.
+# For agreement policies: fraction of remaining masks proposed at each step.
 CANDIDATE_FRACTION="${CANDIDATE_FRACTION:-0.10}"
 
 TASKS="${TASKS:-gsm8k_cot}"

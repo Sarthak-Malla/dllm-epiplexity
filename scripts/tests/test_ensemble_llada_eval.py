@@ -110,7 +110,7 @@ def test_harness_parses_model_args_and_generates(cpu_loader, sampler_type):
     if is_ensemble:
         assert type(harness.sampler) is EnsembleSampler
         assert isinstance(harness.sampler_config, EnsembleSamplerConfig)
-        assert not hasattr(harness.sampler_config, "steps")
+        assert harness.sampler_config.steps == 128
         assert harness.sampler.scheduler is None
         assert harness.sampler_config.ensemble_policy == sampler_type
         assert harness.sampler_config.candidate_fraction == 0.10
@@ -448,3 +448,17 @@ def test_cli_closes_run_and_restores_native_logger(monkeypatch, error, exit_code
         ensemble_eval.main(SimpleNamespace(wandb_args="project=test"))
     assert run.exit_codes == [exit_code]
     assert lm_eval.loggers.WandbLogger is original_logger
+
+
+
+def test_all_harness_accepts_schedule_and_ignores_fraction(cpu_loader):
+    harness = LLaDAEnsembleEvalHarness.create_from_arg_string(
+        "sampler_type=all,pretrained=test/llada,max_new_tokens=3,block_size=2,"
+        "steps=2,stochastic_transfer=True,candidate_fraction=0",
+        {"batch_size": 1, "device": "cpu"},
+    )
+    assert isinstance(harness.sampler, EnsembleSampler)
+    assert harness.sampler_config.ensemble_policy == "all"
+    assert harness.sampler_config.steps == 2
+    assert harness.sampler_config.stochastic_transfer
+    assert harness.generate_until([SimpleNamespace(args=("x", {"until": []}))]) == ["aaa"]

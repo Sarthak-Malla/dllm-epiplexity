@@ -363,7 +363,7 @@ def test_policies_control_commit_counts_without_scheduler(
     assert changed.tolist() == expected_first
     assert len(sampler.model.calls) == expected_calls
     assert len(output.histories) == expected_calls + 1
-    assert config.ensemble_policy == "candidate_expansion"
+    assert config.ensemble_policy == "all"
     torch.testing.assert_close(output.sequences, torch.tensor([[2, 0, 0]]))
 
 
@@ -463,6 +463,7 @@ def test_candidate_fraction_override_uses_remaining_masks(sampler):
     sampler.model = FixedModel()
     output = sampler.sample(
         [[1]], max_new_tokens=20, block_size=20,
+        ensemble_policy="candidate_expansion",
         candidate_fraction=0.25, return_dict=True,
     )
     assert [
@@ -589,8 +590,8 @@ def test_invalid_mask_prediction_cannot_loop_forever(sampler, monkeypatch):
         ({"strategies": ("low_confidence", "low_confidence")}, "unique"),
         ({"strategies": ("missing",)}, "Unknown strategy"),
         ({"ensemble_policy": "missing"}, "Unknown ensemble policy"),
-        ({"candidate_fraction": 0.0}, "candidate_fraction"),
-        ({"candidate_fraction": 1.1}, "candidate_fraction"),
+        ({"ensemble_policy": "candidate_expansion", "candidate_fraction": 0.0}, "candidate_fraction"),
+        ({"ensemble_policy": "majority_voting", "candidate_fraction": 1.1}, "candidate_fraction"),
         ({"block_size": 0}, "block_size"),
         ({"suppress_tokens": [0, 1, 2, 3]}, "No finite token logits"),
     ],
@@ -767,3 +768,72 @@ def test_ensemble_no_masks_produces_no_step_events(sampler):
     sampler.infill([[1, 2]], block_size=None)
     assert events == []
     assert not sampler.model.calls
+
+
+@pytest.mark.parametrize("k, expected", [(0, []), (1, [0, 1]), (2, [0, 1, 2]), (9, [0, 1, 2, 3])])
+def test_all_commits_unique_proposals_without_expansion(sampler, k, expected):
+    scores = torch.tensor([
+        [[4., 3., 2., 1., 100.]],
+        [[4., 2., 3., 1., 100.]],
+        [[3., 4., 2., 1., 100.]],
+    ])
+    metrics = {}
+    selected = sampler._select_positions(
+        scores, torch.tensor([[True, True, True, True, False]]),
+        "all", None, ("low_confidence", "min_entropy", "max_top2_prob"),
+        metrics=metrics, proposal_k=torch.tensor([k]),
+    )
+    assert selected[0].nonzero().flatten().tolist() == expected
+    assert metrics["expanded_sequences"] == 0
+    assert all(counts == [min(k, 4)] for counts in metrics["position_proposals"].values())
+
+
+@pytest.mark.parametrize("method", ["sample", "infill"])
+@pytest.mark.parametrize("stochastic", [False, True])
+def test_all_uses_schedule_once_per_block_and_finishes_early(
+    sampler, monkeypatch, method, stochastic
+):
+    sampler.model = FixedModel()
+    calls = []
+    scheduler = object()
+    sampler.scheduler = scheduler
+
+    def schedule(mask_index, steps, scheduler, stochastic):
+        calls.append((mask_index.sum(-1).tolist(), steps, scheduler, stochastic))
+        # The first block has five masks, the partial final block has two.
+        return torch.tensor([[2, 3] if mask_index.sum() == 5 else [1, 1]])
+
+    def scores(logits, predicted_ids, strategy):
+        values = torch.arange(logits.shape[1], dtype=torch.float).expand(logits.shape[:2])
+        return -values if strategy == "low_confidence" else values
+
+    monkeypatch.setattr("dllm.core.samplers.ensemble.get_num_transfer_tokens", schedule)
+    monkeypatch.setattr(sampler, "_score_positions", scores)
+    inputs = [[1]] if method == "sample" else [[4] * 7]
+    output = getattr(sampler, method)(
+        inputs, ensemble_policy="all", steps=4, block_size=5, max_new_tokens=7,
+        strategies=("low_confidence", "min_entropy"), candidate_fraction=None,
+        stochastic_transfer=stochastic, return_dict=True,
+    )
+    assert calls == [([5], 2, scheduler, stochastic), ([2], 2, scheduler, stochastic)]
+    assert [(b != a).sum().item() for a, b in zip(output.histories, output.histories[1:])] == [4, 1, 2]
+    assert not (output.sequences == 4).any()
+
+
+@pytest.mark.parametrize("stochastic", [False, True])
+def test_all_real_schedule_handles_unequal_rows(sampler, stochastic):
+    sampler.model = FixedModel()
+    output = sampler.infill(
+        [[1, 4, 4, 4, 4, 4, 4], [2, 4], [1]],
+        ensemble_policy="all", steps=4, block_size=4,
+        stochastic_transfer=stochastic, candidate_fraction=0,
+    )
+    torch.testing.assert_close(output, torch.tensor([
+        [1, 0, 0, 0, 0, 0, 0], [2, 0, 3, 3, 3, 3, 3], [1, 3, 3, 3, 3, 3, 3],
+    ]))
+
+
+def test_all_requires_positive_steps(sampler):
+    sampler.model = FixedModel()
+    with pytest.raises(ValueError, match="steps must be positive"):
+        sampler.sample([[1]], steps=0)

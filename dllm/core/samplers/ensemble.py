@@ -16,27 +16,27 @@ import torch
 
 from .base import BaseSamplerConfig, BaseSamplerOutput
 from .mdlm import MDLMSampler
-from .utils import add_gumbel_noise
+from .utils import add_gumbel_noise, get_num_transfer_tokens
 
 
 @dataclass
 class EnsembleSamplerConfig(BaseSamplerConfig):
-    """Decode until each block is filled, without a transfer schedule.
+    """Decode blocks using agreement or a scheduled union of proposals.
 
-    Each strategy proposes ceil(candidate_fraction * remaining_masks) positions
-    in the current block, with at least one proposal per active row. The count
-    is recomputed from the remaining masks every step. Empty agreement expands
-    that count until the policy accepts a position. There is no fixed step
-    budget; agreement determines the actual reveals.
+    Agreement policies propose ceil(candidate_fraction * remaining_masks)
+    positions in the current block. The all policy instead uses the scheduler's
+    per-step transfer counts and commits the union of strategy proposals.
     """
 
     max_new_tokens: int = 128
     max_length: int | None = None
     block_size: int | None = 128
+    steps: int = 128
+    stochastic_transfer: bool = False
     temperature: float = 0.0
     strategies: tuple[str, ...] = ("low_confidence", "min_entropy", "max_top2_prob")
-    ensemble_policy: Literal["candidate_expansion", "majority_voting"] = (
-        "candidate_expansion"
+    ensemble_policy: Literal["candidate_expansion", "majority_voting", "all"] = (
+        "all"
     )
     candidate_fraction: float = 0.10
     cfg_scale: float = 0.0
@@ -54,10 +54,6 @@ class EnsembleSampler(MDLMSampler):
     reveal earlier. Both use the full distribution from logits, independently
     of predicted_ids; low_confidence scores the proposed token instead.
     """
-
-    def __post_init__(self):
-        # Unlike MDLM, ensemble decoding does not initialize or use a scheduler.
-        pass
 
     def _score_positions(self, logits, predicted_ids, strategy):
         if strategy in {"low_confidence", "random"}:
@@ -82,23 +78,26 @@ class EnsembleSampler(MDLMSampler):
         candidate_fraction,
         strategies,
         metrics=None,
+        proposal_k=None,
     ):
         """Return a Boolean commit mask from [strategy, batch, sequence] scores.
 
         Candidate expansion requires all strategies to agree; majority voting
         requires more than half. Both expand the common candidate count when
         needed, using the same scores and predictions without another forward.
-        Each row's initial proposal count is a fraction of its current masks.
+        The all policy commits the union of scheduled per-strategy proposals.
         If supplied, metrics receives expansion counts, all-strategy and pairwise
         intersection counts, and each strategy's proposal count per active row.
         Counts are measured before and after empty-agreement expansion.
         """
         num_strategies = scores.shape[0]
-        required_votes = (
-            num_strategies
-            if ensemble_policy == "candidate_expansion"
-            else num_strategies // 2 + 1
-        )
+        if ensemble_policy == "candidate_expansion":
+            required_votes = num_strategies
+        elif ensemble_policy == "all":
+            required_votes = 1
+        else:
+            required_votes = num_strategies // 2 + 1
+
         transfer_index = torch.zeros_like(eligible)
         if metrics is not None:
             metrics["expanded_sequences"] = 0
@@ -141,8 +140,16 @@ class EnsembleSampler(MDLMSampler):
             # gains q votes. Its minimum finds the first nonempty agreement
             # directly, equivalent to expanding top-k sets one position at a time.
             acceptance_rank = ranks.kthvalue(required_votes, dim=0).values
-            candidate_k = math.ceil(candidate_fraction * remaining)
-            k = max(candidate_k, int(acceptance_rank.min().item()))
+            if ensemble_policy == "all":
+                if proposal_k is None:
+                    raise ValueError("all requires scheduled proposal_k")
+                candidate_k = min(int(proposal_k[j].item()), remaining)
+            else:
+                candidate_k = math.ceil(candidate_fraction * remaining)
+            if ensemble_policy == "all":
+                k = candidate_k
+            else:
+                k = max(candidate_k, int(acceptance_rank.min().item()))
             if metrics is not None:
                 if k > candidate_k:
                     metrics["expanded_sequences"] += 1
@@ -269,6 +276,7 @@ class EnsembleSampler(MDLMSampler):
 
     def _decode_blocks(self, x, attention_mask, region_starts, region_ends, config):
         """Decode each region block until no masks remain, without scheduling."""
+        steps = config.steps
         strategies = config.strategies
         supported = {"low_confidence", "random", "min_entropy", "max_top2_prob"}
         if isinstance(strategies, str) or not strategies:
@@ -277,10 +285,17 @@ class EnsembleSampler(MDLMSampler):
             raise ValueError("strategies must be unique so each strategy gets one vote")
         if any(strategy not in supported for strategy in strategies):
             raise ValueError(f"Unknown strategy in {strategies}")
-        if config.ensemble_policy not in {"candidate_expansion", "majority_voting"}:
+        if config.ensemble_policy not in {
+            "candidate_expansion", "majority_voting", "all"
+        }:
             raise ValueError(f"Unknown ensemble policy: {config.ensemble_policy}")
-        if not 0 < config.candidate_fraction <= 1:
+        if config.ensemble_policy == "all" and config.steps < 1:
+            raise ValueError("steps must be positive")
+        if config.ensemble_policy != "all" and not 0 < config.candidate_fraction <= 1:
             raise ValueError("candidate_fraction must be in (0, 1]")
+
+        if config.ensemble_policy == "all" and self.scheduler is None:
+            super().__post_init__()
 
         block_size = (
             config.block_size if config.block_size is not None else max(1, x.shape[1])
@@ -305,17 +320,35 @@ class EnsembleSampler(MDLMSampler):
             max(end - start for start, end in zip(region_starts, region_ends))
             / block_size
         )
+        steps = math.ceil(steps / num_blocks)
 
         for b in range(num_blocks):
             # Both bounds are explicit: only this block's masks may be committed.
             block_start = starts + b * block_size
             block_end = torch.minimum(block_start + block_size, ends)
+            block_mask_index = torch.zeros(
+                (x.shape[0], block_size), dtype=torch.bool, device=x.device
+            )
+            for j in range(x.shape[0]):
+                start = int(block_start[j].item())
+                end = int(block_end[j].item())
+                if start < end:
+                    block_mask_index[j, : end - start] = x[j, start:end] == mask_id
             block_index = (
                 (positions >= block_start)
                 & (positions < block_end)
                 & attention_mask.bool()
             )
             eligible = block_index & (x == mask_id)
+            num_transfer_tokens = None
+            if config.ensemble_policy == "all":
+                num_transfer_tokens = get_num_transfer_tokens(
+                    mask_index=block_mask_index,
+                    steps=steps,
+                    scheduler=self.scheduler,
+                    stochastic=config.stochastic_transfer,
+                )
+            step = 0
             while eligible.any():
                 # ----- Forward pass (+ optional CFG), matching MDLM -----
                 if config.cfg_scale > 0.0:
@@ -365,6 +398,10 @@ class EnsembleSampler(MDLMSampler):
                     config.candidate_fraction,
                     strategies,
                     metrics=metrics,
+                    proposal_k=(
+                        num_transfer_tokens[:, step]
+                        if num_transfer_tokens is not None else None
+                    ),
                 )
 
                 x[transfer_index] = x0[transfer_index]
@@ -373,6 +410,7 @@ class EnsembleSampler(MDLMSampler):
                 if histories is not None:
                     histories.append(x.clone())
                 eligible = block_index & (x == mask_id)
+                step += 1
 
         if not config.return_dict:
             return x

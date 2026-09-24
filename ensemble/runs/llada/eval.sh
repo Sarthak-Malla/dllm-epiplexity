@@ -17,7 +17,7 @@ set -eo pipefail
 usage() {
     printf '%s\n' \
         'Usage: bash /home/sarthak.malla/dllm-learning-decoding-path/ensemble/runs/llada/eval.sh [--dry-run] [--limit N] MODE' \
-        'Modes: greedy, min_entropy, max_top2_prob, candidate_expansion, majority_voting' \
+        'Modes: greedy, min_entropy, max_top2_prob, candidate_expansion, majority_voting, all' \
         'Shared settings and environment overrides: /home/sarthak.malla/dllm-learning-decoding-path/ensemble/runs/llada/config.sh' \
         '--dry-run prints the resolved command without environment setup or filesystem writes.' \
         '--limit overrides LIMIT with a positive sample count or a fraction between 0 and 1.'
@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h) usage; exit 0 ;;
-        greedy|min_entropy|max_top2_prob|candidate_expansion|majority_voting)
+        greedy|min_entropy|max_top2_prob|candidate_expansion|majority_voting|all)
             if [[ -n "$sampler_type" ]]; then
                 printf 'Specify exactly one sampler mode.\n' >&2
                 exit 2
@@ -86,6 +86,9 @@ model_args="pretrained=${MODEL_NAME_OR_PATH},max_new_tokens=${MAX_NEW_TOKENS},bl
 case "$sampler_type" in
     greedy|min_entropy|max_top2_prob)
         model_args+=",steps=${STEPS}"
+        ;;
+    all)
+        model_args+=",steps=${STEPS},strategies=${STRATEGIES}"
         ;;
     candidate_expansion|majority_voting)
         model_args+=",candidate_fraction=${CANDIDATE_FRACTION},strategies=${STRATEGIES}"

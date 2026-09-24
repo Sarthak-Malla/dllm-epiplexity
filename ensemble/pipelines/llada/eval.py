@@ -8,7 +8,7 @@ After activating the dllm environment, inspect the harness CLI with:
 
 Use --model llada_ensemble and --model_args sampler_type=greedy,... for the
 scheduled baseline. Other sampler types are min_entropy, max_top2_prob,
-candidate_expansion, and majority_voting. Ensemble strategy lists use semicolons,
+candidate_expansion, majority_voting, and all. Ensemble strategy lists use semicolons,
 e.g. strategies=[low_confidence;min_entropy;max_top2_prob], inside quoted model_args.
 """
 
@@ -37,12 +37,12 @@ BASELINE_STRATEGIES = {
     "min_entropy": "min_entropy",
     "max_top2_prob": "max_top2_prob",
 }
-ENSEMBLE_POLICIES = {"candidate_expansion", "majority_voting"}
+ENSEMBLE_POLICIES = {"candidate_expansion", "majority_voting", "all"}
 
 
 @dataclass
 class LLaDAEnsembleEvalSamplerConfig(EnsembleSamplerConfig):
-    """Match the native LLaDA evaluation defaults without a step schedule."""
+    """Match the native LLaDA evaluation generation defaults."""
 
     max_new_tokens: int = 1024
     block_size: int = 1024
@@ -86,8 +86,8 @@ class LLaDAEnsembleEvalHarness(LLaDAEvalHarness):
     """Select the decoder while reusing LLaDA's model and evaluation integration.
 
     The greedy and single-strategy baselines use MDLM's scheduled transfers.
-    Ensemble modes run until blocks finish; steps and stochastic_transfer are
-    rejected for those modes so an apparent step budget cannot be ignored.
+    Agreement modes run until blocks finish without a schedule. The all policy
+    uses scheduled proposal counts and commits their union.
     """
 
     def __init__(self, sampler_type: str = "greedy", **kwargs):
@@ -116,10 +116,13 @@ class LLaDAEnsembleEvalHarness(LLaDAEvalHarness):
                 else LLaDAScheduledStrategySampler
             )
         elif sampler_type in ENSEMBLE_POLICIES:
-            invalid = {"steps", "stochastic_transfer", "remasking"} & kwargs.keys()
+            unused = {"remasking"}
+            if sampler_type != "all":
+                unused |= {"steps", "stochastic_transfer"}
+            invalid = unused & kwargs.keys()
             if invalid:
                 raise ValueError(
-                    f"Scheduler-free sampler {sampler_type!r} "
+                    f"Sampler {sampler_type!r} "
                     f"does not use {sorted(invalid)}"
                 )
             if kwargs.get("ensemble_policy", sampler_type) != sampler_type:
@@ -130,12 +133,15 @@ class LLaDAEnsembleEvalHarness(LLaDAEvalHarness):
             kwargs["strategies"] = _parse_strategies(
                 kwargs.get("strategies", sampler_config.strategies)
             )
-            candidate_fraction = float(
-                kwargs.get("candidate_fraction", sampler_config.candidate_fraction)
-            )
-            if not 0 < candidate_fraction <= 1:
-                raise ValueError("candidate_fraction must be in (0, 1]")
-            kwargs["candidate_fraction"] = candidate_fraction
+            if sampler_type != "all":
+                candidate_fraction = float(
+                    kwargs.get("candidate_fraction", sampler_config.candidate_fraction)
+                )
+                if not 0 < candidate_fraction <= 1:
+                    raise ValueError("candidate_fraction must be in (0, 1]")
+                kwargs["candidate_fraction"] = candidate_fraction
+            elif int(kwargs.get("steps", sampler_config.steps)) < 1:
+                raise ValueError("steps must be positive")
             sampler_cls = EnsembleSampler
         else:
             available = sorted(set(BASELINE_STRATEGIES) | ENSEMBLE_POLICIES)
