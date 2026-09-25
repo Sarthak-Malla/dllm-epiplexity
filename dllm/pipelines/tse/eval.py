@@ -8,6 +8,7 @@ from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
+from tqdm import tqdm
 
 from dllm.pipelines.tse.loader import load_tse_models
 from dllm.pipelines.tse.models import TSEConfig
@@ -95,7 +96,10 @@ class TSEEvalHarness(LM):
     @torch.no_grad()
     def generate_until(self, requests: list[Instance]) -> list[str]:
         outputs = []
-        for start in range(0, len(requests), self.batch_size):
+        for start in tqdm(
+            range(0, len(requests), self.batch_size),
+            desc="TSE GSM8K generation",
+        ):
             batch = requests[start : start + self.batch_size]
             contexts, generation_kwargs = zip(*[instance.args for instance in batch])
             prompts = [
