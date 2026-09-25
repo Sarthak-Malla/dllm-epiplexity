@@ -16,13 +16,10 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
-CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
-if [[ ! -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
-    echo "Conda initialization script not found: ${CONDA_ROOT}/etc/profile.d/conda.sh" >&2
-    exit 1
-fi
-source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-conda activate "${CONDA_ROOT}/envs/dllm"
+source /apps/local/conda_init.sh
+conda activate dllm
+
+srun nvidia-smi
 
 export PYTHONPATH=".:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
