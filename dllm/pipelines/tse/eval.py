@@ -36,7 +36,17 @@ class TSEEvalHarness(LM):
             remasking=kwargs.get("remasking", "low_confidence"),
             stochastic_transfer=kwargs.get("stochastic_transfer", False),
             capture_logits=kwargs.get("capture_logits", False),
+            alpha=float(kwargs.get("alpha", 0.5)),
+            temperature_a=float(kwargs.get("temperature_a", 1.0)),
+            temperature_b=float(kwargs.get("temperature_b", 1.0)),
+            epsilon=float(kwargs.get("epsilon", 1e-9)),
+            fusion_device=kwargs.get("fusion_device", "cuda:0"),
+            weighting_mode=kwargs.get("weighting_mode", "static"),
+            weight_temperature=float(kwargs.get("weight_temperature", 1.0)),
+            normalize_entropy=kwargs.get("normalize_entropy", True),
         )
+        self.selection_mode = kwargs.get("selection_mode", "tse")
+        self.baseline_model = kwargs.get("baseline_model", "b")
         accelerator = accelerate.Accelerator()
         self._rank = accelerator.process_index
         self._world_size = accelerator.num_processes
@@ -101,6 +111,16 @@ class TSEEvalHarness(LM):
                 remasking=self.config.remasking,
                 stochastic_transfer=self.config.stochastic_transfer,
                 capture_logits=self.config.capture_logits,
+                baseline_model=self.baseline_model,
+                selection_mode=self.selection_mode,
+                alpha=self.config.alpha,
+                temperature_a=self.config.temperature_a,
+                temperature_b=self.config.temperature_b,
+                epsilon=self.config.epsilon,
+                fusion_device=self.config.fusion_device,
+                weighting_mode=self.config.weighting_mode,
+                weight_temperature=self.config.weight_temperature,
+                normalize_entropy=self.config.normalize_entropy,
             )
             answers = self.tokenizer.batch_decode(generated, skip_special_tokens=False)
             for answer, prompt, kwargs_for_generation in zip(
