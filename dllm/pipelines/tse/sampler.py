@@ -11,6 +11,11 @@ from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_diver
 from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
 from dllm.pipelines.tse.selection import commit_tokens, select_positions
+from dllm.pipelines.tse.weighting import (
+    online_entropy_weights,
+    per_token_margin_weights,
+    static_weights,
+)
 
 
 class TSESampler:
@@ -78,6 +83,9 @@ class TSESampler:
         temperature_b: float = 1.0,
         epsilon: float = 1e-9,
         fusion_device: str | None = None,
+        weighting_mode: str = "static",
+        weight_temperature: float = 1.0,
+        normalize_entropy: bool = True,
     ) -> torch.Tensor:
         """Generate with paired forwards and baseline or TSE selection."""
         if not inputs:
@@ -88,6 +96,11 @@ class TSESampler:
             raise ValueError("baseline_model must be 'a' or 'b'")
         if selection_mode not in {"baseline", "tse"}:
             raise ValueError("selection_mode must be 'baseline' or 'tse'")
+        if weighting_mode not in {"static", "online_entropy", "per_token_margin"}:
+            raise ValueError(
+                "weighting_mode must be 'static', 'online_entropy', "
+                "or 'per_token_margin'"
+            )
 
         mask_id = self.tokenizer.mask_token_id
         eos_id = self.tokenizer.eos_token_id
@@ -163,13 +176,36 @@ class TSESampler:
                     probabilities_b = logits_to_probabilities(
                         active_logits_b.to(target_device), temperature_b
                     )
+                    if weighting_mode == "static":
+                        weighting = static_weights(
+                            alpha, probabilities_a.shape[0], target_device
+                        )
+                    elif weighting_mode == "online_entropy":
+                        weighting = online_entropy_weights(
+                            probabilities_a,
+                            probabilities_b,
+                            weight_temperature,
+                            epsilon,
+                            normalize_entropy,
+                        )
+                    else:
+                        weighting = per_token_margin_weights(
+                            probabilities_a,
+                            probabilities_b,
+                            weight_temperature,
+                        )
                     fused = fuse_probabilities(
-                        probabilities_a, probabilities_b, alpha
+                        probabilities_a, probabilities_b, weighting.weights_a
                     )
                     divergence = jensen_shannon_divergence(
-                        probabilities_a, probabilities_b, alpha, epsilon
+                        probabilities_a,
+                        probabilities_b,
+                        weighting.weights_a,
+                        epsilon,
                     )
-                    agreement = agreement_factor(divergence, alpha, epsilon)
+                    agreement = agreement_factor(
+                        divergence, weighting.weights_a, epsilon
+                    )
                     confidence, predicted_tokens = fused_confidence(fused)
                     scores = consensus_scores(confidence, agreement)
 

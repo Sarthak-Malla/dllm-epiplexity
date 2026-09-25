@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--temperature-a", type=float, default=1.0)
     parser.add_argument("--temperature-b", type=float, default=1.0)
+    parser.add_argument(
+        "--weighting-mode",
+        choices=("static", "online_entropy", "per_token_margin"),
+        default="static",
+    )
+    parser.add_argument("--weight-temperature", type=float, default=1.0)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
 
@@ -143,10 +149,13 @@ def main() -> None:
         alpha=args.alpha,
         temperature_a=args.temperature_a,
         temperature_b=args.temperature_b,
+        weighting_mode=args.weighting_mode,
+        weight_temperature=args.weight_temperature,
     )
 
     print("Baseline commit model:", args.baseline_model)
     print("Selection mode:", args.selection_mode)
+    print("Weighting mode:", args.weighting_mode)
     print("Captured forward steps:", len(sampler.last_paired_logits))
     if sampler.last_paired_logits:
         print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)

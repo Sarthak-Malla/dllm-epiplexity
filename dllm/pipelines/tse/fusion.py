@@ -22,11 +22,9 @@ def logits_to_probabilities(
 def fuse_probabilities(
     probabilities_a: torch.Tensor,
     probabilities_b: torch.Tensor,
-    alpha: float = 0.5,
+    alpha: float | torch.Tensor = 0.5,
 ) -> torch.Tensor:
-    """Blend two aligned probability tensors without changing their shape."""
-    if not 0 <= alpha <= 1:
-        raise ValueError("alpha must be between 0 and 1")
+    """Blend two aligned probability tensors with scalar or local weights."""
     if probabilities_a.shape != probabilities_b.shape:
         raise ValueError(
             "probability tensors must have identical shapes: "
@@ -37,7 +35,17 @@ def fuse_probabilities(
     ).all():
         raise ValueError("probabilities must contain only finite values")
 
-    fused = alpha * probabilities_a.float() + (1 - alpha) * probabilities_b.float()
+    weight_a = torch.as_tensor(
+        alpha, dtype=torch.float32, device=probabilities_a.device
+    )
+    if weight_a.ndim == 1 and probabilities_a.ndim == 2:
+        weight_a = weight_a.unsqueeze(-1)
+    if weight_a.ndim not in {0, probabilities_a.ndim}:
+        raise ValueError("alpha must be scalar or broadcastable over probabilities")
+    if (weight_a < 0).any() or (weight_a > 1).any():
+        raise ValueError("alpha must be between 0 and 1")
+
+    fused = weight_a * probabilities_a.float() + (1 - weight_a) * probabilities_b.float()
     if not torch.isfinite(fused).all():
         raise ValueError("probability fusion produced non-finite values")
     return fused

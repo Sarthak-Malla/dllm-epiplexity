@@ -24,3 +24,6 @@ class TSEConfig:
     temperature_b: float = 1.0
     epsilon: float = 1e-9
     fusion_device: str = "cuda:0"
+    weighting_mode: str = "static"
+    weight_temperature: float = 1.0
+    normalize_entropy: bool = True
