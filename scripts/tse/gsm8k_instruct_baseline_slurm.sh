@@ -39,7 +39,7 @@ accelerate launch --num_processes 1 dllm/pipelines/llada/eval.py \
     --model llada \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
-    --model_args "pretrained=GSAI-ML/LLaDA-8B-Instruct,max_new_tokens=512,steps=512,block_size=512,cfg_scale=0.0,suppress_tokens=[],begin_suppress_tokens=[126081;126348]"
+    --model_args "pretrained=GSAI-ML/LLaDA-8B-Instruct,max_new_tokens=512,steps=128,block_size=32,cfg_scale=0.0,suppress_tokens=[],begin_suppress_tokens=[126081;126348]"
 
 python scripts/tse/log_eval_to_wandb.py \
     --result-path "${RESULT_PATH}" \

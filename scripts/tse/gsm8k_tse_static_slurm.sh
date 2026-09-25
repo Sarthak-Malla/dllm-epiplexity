@@ -39,7 +39,7 @@ accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
     --model tse_llada \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
-    --model_args "model_a=GSAI-ML/LLaDA-8B-Base,model_b=GSAI-ML/LLaDA-8B-Instruct,model_a_device=cuda:0,model_b_device=cuda:1,fusion_device=cuda:0,max_new_tokens=512,steps=512,block_size=512,selection_mode=tse,weighting_mode=static,alpha=0.5,temperature_a=1.0,temperature_b=1.0,weight_temperature=1.0"
+    --model_args "model_a=GSAI-ML/LLaDA-8B-Base,model_b=GSAI-ML/LLaDA-8B-Instruct,model_a_device=cuda:0,model_b_device=cuda:1,fusion_device=cuda:0,max_new_tokens=512,steps=128,block_size=32,selection_mode=tse,weighting_mode=static,alpha=0.5,temperature_a=1.0,temperature_b=1.0,weight_temperature=1.0"
 
 python scripts/tse/log_eval_to_wandb.py \
     --result-path "${RESULT_PATH}" \
