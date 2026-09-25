@@ -1,4 +1,4 @@
-"""Synchronized two-model sampling for Phase 2 TSE."""
+"""Synchronized two-model sampling for TSE."""
 
 import math
 
@@ -7,13 +7,17 @@ import torch.nn.functional as F
 
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 from dllm.core.schedulers import LinearAlphaScheduler
+from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_divergence
+from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
+from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
+from dllm.pipelines.tse.selection import commit_tokens, select_positions
 
 
 class TSESampler:
     """Run paired forwards on one shared diffusion canvas.
 
-    Phase 2 commits tokens using Model A only. Probability fusion and
-    consensus-based selection are intentionally deferred to Phase 3.
+    Baseline mode commits tokens using one selected model. TSE mode uses
+    probability fusion and consensus-based selection.
     """
 
     def __init__(
@@ -68,14 +72,22 @@ class TSESampler:
         stochastic_transfer: bool = False,
         capture_logits: bool = False,
         baseline_model: str = "a",
+        selection_mode: str = "baseline",
+        alpha: float = 0.5,
+        temperature_a: float = 1.0,
+        temperature_b: float = 1.0,
+        epsilon: float = 1e-9,
+        fusion_device: str | None = None,
     ) -> torch.Tensor:
-        """Generate with paired forwards and one model's baseline selection."""
+        """Generate with paired forwards and baseline or TSE selection."""
         if not inputs:
             raise ValueError("TSESampler.sample requires at least one input")
         if steps < 1 or block_size < 1 or max_new_tokens < 1:
             raise ValueError("steps, block_size, and max_new_tokens must be positive")
         if baseline_model not in {"a", "b"}:
             raise ValueError("baseline_model must be 'a' or 'b'")
+        if selection_mode not in {"baseline", "tse"}:
+            raise ValueError("selection_mode must be 'baseline' or 'tse'")
 
         mask_id = self.tokenizer.mask_token_id
         eos_id = self.tokenizer.eos_token_id
@@ -137,23 +149,61 @@ class TSESampler:
                         (positions, active_a.detach().cpu(), active_b.detach().cpu())
                     )
 
-                logits = (
-                    logits_a
-                    if baseline_model == "a"
-                    else logits_b.to(self.model_a_device)
-                )
-                x0 = torch.argmax(
-                    add_gumbel_noise(logits, temperature=temperature), dim=-1
-                )
-                if remasking == "low_confidence":
-                    probabilities = F.softmax(logits, dim=-1)
-                    confidence = torch.gather(
-                        probabilities, -1, x0.unsqueeze(-1)
-                    ).squeeze(-1)
-                elif remasking == "random":
-                    confidence = torch.rand_like(x0, dtype=torch.float)
+                if selection_mode == "tse":
+                    active_mask_a = mask_index.to(self.model_a_device)
+                    active_mask_b = mask_index.to(self.model_b_device)
+                    active_logits_a = logits_a[active_mask_a]
+                    active_logits_b = logits_b[active_mask_b]
+                    target_device = torch.device(
+                        fusion_device or self.model_a_device
+                    )
+                    probabilities_a = logits_to_probabilities(
+                        active_logits_a.to(target_device), temperature_a
+                    )
+                    probabilities_b = logits_to_probabilities(
+                        active_logits_b.to(target_device), temperature_b
+                    )
+                    fused = fuse_probabilities(
+                        probabilities_a, probabilities_b, alpha
+                    )
+                    divergence = jensen_shannon_divergence(
+                        probabilities_a, probabilities_b, alpha, epsilon
+                    )
+                    agreement = agreement_factor(divergence, alpha, epsilon)
+                    confidence, predicted_tokens = fused_confidence(fused)
+                    scores = consensus_scores(confidence, agreement)
+
+                    x0 = canvas.clone()
+                    confidence = torch.full_like(
+                        canvas, -torch.inf, dtype=torch.float32
+                    )
+                    positions = mask_index.nonzero(as_tuple=False)
+                    x0[positions[:, 0], positions[:, 1]] = predicted_tokens.to(
+                        canvas.device
+                    )
+                    confidence[positions[:, 0], positions[:, 1]] = scores.to(
+                        canvas.device
+                    )
                 else:
-                    raise ValueError(f"Unsupported remasking strategy: {remasking}")
+                    logits = (
+                        logits_a
+                        if baseline_model == "a"
+                        else logits_b.to(self.model_a_device)
+                    )
+                    x0 = torch.argmax(
+                        add_gumbel_noise(logits, temperature=temperature), dim=-1
+                    )
+                    if remasking == "low_confidence":
+                        probabilities = F.softmax(logits, dim=-1)
+                        confidence = torch.gather(
+                            probabilities, -1, x0.unsqueeze(-1)
+                        ).squeeze(-1)
+                    elif remasking == "random":
+                        confidence = torch.rand_like(x0, dtype=torch.float)
+                    else:
+                        raise ValueError(
+                            f"Unsupported remasking strategy: {remasking}"
+                        )
 
                 for sample_index, prompt_len in enumerate(prompt_lens):
                     confidence[
@@ -162,12 +212,13 @@ class TSESampler:
 
                 x0 = torch.where(mask_index, x0, canvas)
                 confidence = torch.where(mask_index, confidence, -torch.inf)
-                transfer_index = torch.zeros_like(mask_index)
-                for sample_index in range(batch_size):
-                    count = int(transfer_counts[sample_index, step_index].item())
-                    if count:
-                        _, selected = torch.topk(confidence[sample_index], k=count)
-                        transfer_index[sample_index, selected] = True
-                canvas[transfer_index] = x0[transfer_index]
+                active_positions = mask_index.nonzero(as_tuple=False)
+                selected_positions, selected_tokens = select_positions(
+                    confidence[mask_index],
+                    x0[mask_index],
+                    active_positions,
+                    transfer_counts[:, step_index],
+                )
+                canvas = commit_tokens(canvas, selected_positions, selected_tokens)
 
         return canvas

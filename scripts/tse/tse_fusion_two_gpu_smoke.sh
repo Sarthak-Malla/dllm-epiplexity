@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tse-phase2-baseline
+#SBATCH --job-name=tse-fusion-smoke
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=00:20:00
@@ -36,6 +36,8 @@ python scripts/tse/smoke.py \
     --max-new-tokens 64 \
     --steps 64 \
     --block-size 64 \
-    --baseline-model b \
-    --selection-mode baseline \
+    --selection-mode tse \
+    --alpha 0.5 \
+    --temperature-a 1.0 \
+    --temperature-b 1.0 \
     --top-k 5

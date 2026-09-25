@@ -1,4 +1,4 @@
-"""Run the Phase 2 two-GPU TSE baseline smoke test.
+"""Run the two-GPU TSE smoke test.
 
 Run from the repository root with:
 
@@ -36,8 +36,17 @@ def parse_args() -> argparse.Namespace:
         "--baseline-model",
         choices=("a", "b"),
         default="b",
-        help="Model used for temporary Phase 2 token commitment.",
+        help="Model used for baseline token commitment.",
     )
+    parser.add_argument(
+        "--selection-mode",
+        choices=("baseline", "tse"),
+        default="baseline",
+        help="Use a baseline model or TSE selection.",
+    )
+    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--temperature-a", type=float, default=1.0)
+    parser.add_argument("--temperature-b", type=float, default=1.0)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
 
@@ -130,9 +139,14 @@ def main() -> None:
         block_size=config.block_size,
         capture_logits=True,
         baseline_model=args.baseline_model,
+        selection_mode=args.selection_mode,
+        alpha=args.alpha,
+        temperature_a=args.temperature_a,
+        temperature_b=args.temperature_b,
     )
 
     print("Baseline commit model:", args.baseline_model)
+    print("Selection mode:", args.selection_mode)
     print("Captured forward steps:", len(sampler.last_paired_logits))
     if sampler.last_paired_logits:
         print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)

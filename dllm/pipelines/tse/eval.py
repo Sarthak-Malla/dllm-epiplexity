@@ -16,7 +16,7 @@ from dllm.pipelines.tse.sampler import TSESampler
 
 @dataclass
 class TSEEvalHarness(LM):
-    """Run Phase 2 paired forwards with Model A baseline selection."""
+    """Run paired forwards with baseline or TSE selection."""
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -42,7 +42,7 @@ class TSEEvalHarness(LM):
         self._world_size = accelerator.num_processes
         if self._world_size != 1:
             raise ValueError(
-                "Phase 2 TSE requires one process; assign models with "
+                "TSE requires one process; assign models with "
                 "model_a_device and model_b_device"
             )
 
@@ -114,10 +114,10 @@ class TSEEvalHarness(LM):
         return outputs
 
     def loglikelihood(self, requests):
-        raise NotImplementedError("TSE Phase 2 supports generation only")
+        raise NotImplementedError("TSE supports generation only")
 
     def loglikelihood_rolling(self, requests):
-        raise NotImplementedError("TSE Phase 2 supports generation only")
+        raise NotImplementedError("TSE supports generation only")
 
 
 register_model("tse_llada")(TSEEvalHarness)
