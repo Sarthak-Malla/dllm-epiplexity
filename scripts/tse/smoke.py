@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=16)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--baseline-model",
+        choices=("a", "b"),
+        default="b",
+        help="Model used for temporary Phase 2 token commitment.",
+    )
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
 
@@ -123,8 +129,10 @@ def main() -> None:
         steps=config.steps,
         block_size=config.block_size,
         capture_logits=True,
+        baseline_model=args.baseline_model,
     )
 
+    print("Baseline commit model:", args.baseline_model)
     print("Captured forward steps:", len(sampler.last_paired_logits))
     if sampler.last_paired_logits:
         print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)

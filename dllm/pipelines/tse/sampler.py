@@ -67,12 +67,15 @@ class TSESampler:
         remasking: str = "low_confidence",
         stochastic_transfer: bool = False,
         capture_logits: bool = False,
+        baseline_model: str = "a",
     ) -> torch.Tensor:
-        """Generate with paired forwards and Model A baseline selection."""
+        """Generate with paired forwards and one model's baseline selection."""
         if not inputs:
             raise ValueError("TSESampler.sample requires at least one input")
         if steps < 1 or block_size < 1 or max_new_tokens < 1:
             raise ValueError("steps, block_size, and max_new_tokens must be positive")
+        if baseline_model not in {"a", "b"}:
+            raise ValueError("baseline_model must be 'a' or 'b'")
 
         mask_id = self.tokenizer.mask_token_id
         eos_id = self.tokenizer.eos_token_id
@@ -134,7 +137,11 @@ class TSESampler:
                         (positions, active_a.detach().cpu(), active_b.detach().cpu())
                     )
 
-                logits = logits_a
+                logits = (
+                    logits_a
+                    if baseline_model == "a"
+                    else logits_b.to(self.model_a_device)
+                )
                 x0 = torch.argmax(
                     add_gumbel_noise(logits, temperature=temperature), dim=-1
                 )

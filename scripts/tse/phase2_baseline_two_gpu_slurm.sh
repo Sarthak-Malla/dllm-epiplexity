@@ -36,4 +36,5 @@ python scripts/tse/smoke.py \
     --max-new-tokens 64 \
     --steps 64 \
     --block-size 64 \
+    --baseline-model b \
     --top-k 5
