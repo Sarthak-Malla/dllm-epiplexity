@@ -11,13 +11,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 
-set -euo pipefail
+set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
 source /apps/local/conda_init.sh
 conda activate dllm
+set -u
 
 srun nvidia-smi
 
