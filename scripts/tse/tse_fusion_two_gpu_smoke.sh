@@ -4,6 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=00:20:00
 #SBATCH --nodes=1
+#SBATCH --exclude=gpu-05,gpu-54
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
