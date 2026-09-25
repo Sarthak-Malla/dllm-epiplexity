@@ -2,7 +2,7 @@
 #SBATCH --job-name=tse-phase2-baseline
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=00:20:00
 #SBATCH --nodes=1
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
@@ -16,8 +16,13 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
-source ~/.zshrc
-conda activate ~/miniconda3/envs/dllm
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+if [[ ! -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
+    echo "Conda initialization script not found: ${CONDA_ROOT}/etc/profile.d/conda.sh" >&2
+    exit 1
+fi
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ROOT}/envs/dllm"
 
 export PYTHONPATH=".:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
