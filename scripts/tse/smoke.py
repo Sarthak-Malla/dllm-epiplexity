@@ -8,11 +8,11 @@ Run from the repository root with:
 """
 
 import argparse
+from pathlib import Path
 
 import torch
 
-from dllm.pipelines.tse import TSEConfig, TSESampler
-from dllm.pipelines.tse.loader import load_tse_models
+import dllm
 
 
 DEFAULT_QUESTION = (
@@ -64,6 +64,18 @@ def print_device_summary() -> None:
         print(f"cuda:{index}:", torch.cuda.get_device_name(index))
 
 
+def print_import_summary() -> None:
+    """Print the checkout and package locations used by the smoke test."""
+    print("Working directory:", Path.cwd())
+    print("dllm package:", Path(dllm.__file__).resolve())
+    try:
+        import dllm.pipelines.tse as tse
+    except ModuleNotFoundError as error:
+        print("TSE package import failed:", error)
+        raise
+    print("TSE package:", Path(tse.__file__).resolve())
+
+
 def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
     print("\nPaired active-position logits:")
     for step, (positions, logits_a, logits_b) in enumerate(paired_logits):
@@ -91,6 +103,10 @@ def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
 
 def main() -> None:
     args = parse_args()
+    print_import_summary()
+    from dllm.pipelines.tse import TSEConfig, TSESampler
+    from dllm.pipelines.tse.loader import load_tse_models
+
     print_device_summary()
 
     config = TSEConfig(
