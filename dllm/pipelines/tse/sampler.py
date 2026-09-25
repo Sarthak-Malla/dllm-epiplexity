@@ -127,10 +127,11 @@ class TSESampler:
                 mask_index = canvas == mask_id
                 logits_a, logits_b = self.forward_pair(canvas, attention_mask)
                 if capture_logits:
+                    positions = mask_index.nonzero(as_tuple=False).cpu()
                     active_a = logits_a[mask_index.to(self.model_a_device)]
                     active_b = logits_b[mask_index.to(self.model_b_device)]
                     self.last_paired_logits.append(
-                        (active_a.detach(), active_b.detach())
+                        (positions, active_a.detach().cpu(), active_b.detach().cpu())
                     )
 
                 logits = logits_a

@@ -45,17 +45,27 @@ def print_device_summary() -> None:
 
 def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
     print("\nPaired active-position logits:")
-    for step, (logits_a, logits_b) in enumerate(paired_logits):
-        logits_a = logits_a[0].float().cpu()
-        logits_b = logits_b[0].float().cpu()
-        values_a, ids_a = torch.topk(logits_a, k=top_k)
-        values_b, ids_b = torch.topk(logits_b, k=top_k)
-        tokens_a = [tokenizer.convert_ids_to_tokens(int(token_id)) for token_id in ids_a]
-        tokens_b = [tokenizer.convert_ids_to_tokens(int(token_id)) for token_id in ids_b]
-        print(f"step {step}: active positions={len(paired_logits[step][0])}")
-        print("  model A:", list(zip(tokens_a, [round(float(v), 3) for v in values_a])))
-        print("  model B:", list(zip(tokens_b, [round(float(v), 3) for v in values_b])))
-        print("  top-1 agreement:", int(ids_a[0]) == int(ids_b[0]))
+    for step, (positions, logits_a, logits_b) in enumerate(paired_logits):
+        print(f"step {step}: active positions={len(positions)}")
+        for active_index, (batch_index, sequence_position) in enumerate(positions.tolist()):
+            position_logits_a = logits_a[active_index].float()
+            position_logits_b = logits_b[active_index].float()
+            values_a, ids_a = torch.topk(position_logits_a, k=top_k)
+            values_b, ids_b = torch.topk(position_logits_b, k=top_k)
+            tokens_a = [
+                tokenizer.convert_ids_to_tokens(int(token_id)) for token_id in ids_a
+            ]
+            tokens_b = [
+                tokenizer.convert_ids_to_tokens(int(token_id)) for token_id in ids_b
+            ]
+            scores_a = [round(float(value), 3) for value in values_a]
+            scores_b = [round(float(value), 3) for value in values_b]
+            print(
+                f"  batch={batch_index}, sequence_position={sequence_position}"
+            )
+            print("    model A:", list(zip(tokens_a, scores_a)))
+            print("    model B:", list(zip(tokens_b, scores_b)))
+            print("    top-1 agreement:", int(ids_a[0]) == int(ids_b[0]))
 
 
 def main() -> None:

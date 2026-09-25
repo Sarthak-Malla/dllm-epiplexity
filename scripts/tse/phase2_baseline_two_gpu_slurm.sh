@@ -33,7 +33,7 @@ python scripts/tse/smoke.py \
     --model-b "GSAI-ML/LLaDA-8B-Instruct" \
     --model-a-device cuda:0 \
     --model-b-device cuda:1 \
-    --max-new-tokens 16 \
-    --steps 16 \
-    --block-size 16 \
+    --max-new-tokens 64 \
+    --steps 64 \
+    --block-size 64 \
     --top-k 5
