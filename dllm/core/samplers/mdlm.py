@@ -22,6 +22,7 @@ class MDLMSamplerConfig(BaseSamplerConfig):
     block_size: int = 128
     steps: int = 128
     temperature: float = 0.0
+    probability_temperature: float = 1.0
     remasking: str = "low_confidence"
     stochastic_transfer: bool = False
     cfg_scale: float = 0.0
@@ -63,6 +64,9 @@ class MDLMSampler(BaseSampler):
         max_length = kwargs.get("max_length", config.max_length)
         block_size = kwargs.get("block_size", config.block_size)
         temperature = kwargs.get("temperature", config.temperature)
+        probability_temperature = kwargs.get(
+            "probability_temperature", config.probability_temperature
+        )
         cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
         cfg_keep_tokens = kwargs.get("cfg_keep_tokens", config.cfg_keep_tokens)
         remasking = kwargs.get("remasking", config.remasking)
@@ -75,6 +79,9 @@ class MDLMSampler(BaseSampler):
         begin_suppress_tokens = kwargs.get(
             "begin_suppress_tokens", config.begin_suppress_tokens
         )
+
+        if probability_temperature <= 0:
+            raise ValueError("probability_temperature must be positive")
 
         assert 1 <= block_size
         assert 1 <= steps
@@ -195,7 +202,7 @@ class MDLMSampler(BaseSampler):
 
                 # Per-position confidence used to pick which masks to commit this step
                 if remasking == "low_confidence":
-                    p = F.softmax(logits, dim=-1)
+                    p = F.softmax(logits.float() / probability_temperature, dim=-1)
                     x0_p = torch.squeeze(
                         torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
                     )  # [B, T] confidence of predicted token

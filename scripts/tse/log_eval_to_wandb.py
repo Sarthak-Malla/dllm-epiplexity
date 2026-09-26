@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weighting-mode", default="none")
     parser.add_argument("--model-a", default="")
     parser.add_argument("--model-b", default="")
+    parser.add_argument("--temperature-a", type=float)
+    parser.add_argument("--temperature-b", type=float)
+    parser.add_argument("--probability-temperature", type=float)
+    parser.add_argument("--alpha", type=float)
+    parser.add_argument("--config-path", default="")
     return parser.parse_args()
 
 
@@ -45,12 +50,32 @@ def flatten_numbers(value, prefix=""):
     return metrics
 
 
+def resolve_result_path(result_path: Path) -> Path:
+    """Resolve lm-eval's timestamped output when the requested path is a prefix."""
+    if result_path.is_file():
+        return result_path
+
+    candidates = sorted(
+        result_path.parent.glob(f"{result_path.stem}_*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        resolved_path = candidates[0]
+        print(
+            f"Requested result was not found; using newest lm-eval result: "
+            f"{resolved_path}"
+        )
+        return resolved_path
+
+    raise FileNotFoundError(f"lm-eval result file not found: {result_path}")
+
+
 def main() -> None:
     args = parse_args()
-    if not args.result_path.is_file():
-        raise FileNotFoundError(f"lm-eval result file not found: {args.result_path}")
+    result_path = resolve_result_path(args.result_path)
 
-    with args.result_path.open() as result_file:
+    with result_path.open() as result_file:
         result = json.load(result_file)
 
     config = {
@@ -58,7 +83,12 @@ def main() -> None:
         "weighting_mode": args.weighting_mode,
         "model_a": args.model_a,
         "model_b": args.model_b,
-        "result_path": str(args.result_path),
+        "result_path": str(result_path),
+        "temperature_a": args.temperature_a,
+        "temperature_b": args.temperature_b,
+        "probability_temperature": args.probability_temperature,
+        "alpha": args.alpha,
+        "config_path": args.config_path,
     }
     init_kwargs = {
         "project": args.project,
@@ -74,7 +104,7 @@ def main() -> None:
         run.log(metrics)
         for key, value in metrics.items():
             run.summary[key] = value
-    run.summary["result_path"] = str(args.result_path)
+    run.summary["result_path"] = str(result_path)
     run.finish()
     print(f"Logged {len(metrics)} metrics to W&B run {args.run_name}")
 

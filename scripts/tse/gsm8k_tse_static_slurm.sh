@@ -17,6 +17,33 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
+CONFIG_PATH="${1:-scripts/tse/configs/gsm8k_instruct_temperature_static.conf}"
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+    echo "Configuration file not found: ${CONFIG_PATH}" >&2
+    exit 1
+fi
+source "${CONFIG_PATH}"
+
+: "${experiment_name:?experiment_name is required}"
+: "${model_a:?model_a is required}"
+: "${model_b:?model_b is required}"
+: "${model_a_device:?model_a_device is required}"
+: "${model_b_device:?model_b_device is required}"
+: "${fusion_device:?fusion_device is required}"
+: "${dtype:?dtype is required}"
+: "${max_new_tokens:?max_new_tokens is required}"
+: "${steps:?steps is required}"
+: "${block_size:?block_size is required}"
+: "${selection_mode:?selection_mode is required}"
+: "${weighting_mode:?weighting_mode is required}"
+: "${alpha:?alpha is required}"
+: "${temperature_a:?temperature_a is required}"
+: "${temperature_b:?temperature_b is required}"
+: "${weight_temperature:?weight_temperature is required}"
+: "${temperature:?temperature is required}"
+: "${remasking:?remasking is required}"
+: "${num_fewshot:?num_fewshot is required}"
+
 source /apps/local/conda_init.sh
 conda activate dllm
 set -u
@@ -31,20 +58,27 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-RESULT_PATH=".logs/tse_gsm8k_static_${SLURM_JOB_ID}.json"
+RESULT_PATH=".logs/tse_gsm8k_${experiment_name}_${SLURM_JOB_ID}.json"
+RUN_NAME="tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}"
+
+MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking}"
 
 accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
     --tasks gsm8k_cot \
-    --num_fewshot 5 \
+    --num_fewshot "${num_fewshot}" \
     --model tse_llada \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
-    --model_args "model_a=GSAI-ML/LLaDA-8B-Base,model_b=GSAI-ML/LLaDA-8B-Instruct,model_a_device=cuda:0,model_b_device=cuda:1,fusion_device=cuda:0,max_new_tokens=512,steps=128,block_size=32,selection_mode=tse,weighting_mode=static,alpha=0.5,temperature_a=1.0,temperature_b=1.0,weight_temperature=1.0"
+    --model_args "${MODEL_ARGS}"
 
 python scripts/tse/log_eval_to_wandb.py \
     --result-path "${RESULT_PATH}" \
-    --run-name "tse-gsm8k-static-${SLURM_JOB_ID}" \
+    --run-name "${RUN_NAME}" \
     --mode tse \
-    --weighting-mode static \
-    --model-a "GSAI-ML/LLaDA-8B-Base" \
-    --model-b "GSAI-ML/LLaDA-8B-Instruct"
+    --weighting-mode "${weighting_mode}" \
+    --model-a "${model_a}" \
+    --model-b "${model_b}" \
+    --temperature-a "${temperature_a}" \
+    --temperature-b "${temperature_b}" \
+    --alpha "${alpha}" \
+    --config-path "${CONFIG_PATH}"

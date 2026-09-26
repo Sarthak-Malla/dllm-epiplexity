@@ -17,6 +17,25 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
+CONFIG_PATH="${1:-scripts/tse/configs/gsm8k_instruct_probability_temperature_02.conf}"
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+    echo "Configuration file not found: ${CONFIG_PATH}" >&2
+    exit 1
+fi
+source "${CONFIG_PATH}"
+
+: "${experiment_name:?experiment_name is required}"
+: "${model_name_or_path:?model_name_or_path is required}"
+: "${max_new_tokens:?max_new_tokens is required}"
+: "${steps:?steps is required}"
+: "${block_size:?block_size is required}"
+: "${probability_temperature:?probability_temperature is required}"
+: "${temperature:?temperature is required}"
+: "${cfg_scale:?cfg_scale is required}"
+: "${suppress_tokens:?suppress_tokens is required}"
+: "${begin_suppress_tokens:?begin_suppress_tokens is required}"
+: "${num_fewshot:?num_fewshot is required}"
+
 source /apps/local/conda_init.sh
 conda activate dllm
 set -u
@@ -31,18 +50,23 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-RESULT_PATH=".logs/tse_gsm8k_instruct_baseline_${SLURM_JOB_ID}.json"
+RESULT_PATH=".logs/tse_gsm8k_${experiment_name}_${SLURM_JOB_ID}.json"
+RUN_NAME="tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}"
+
+MODEL_ARGS="pretrained=${model_name_or_path},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},temperature=${temperature},probability_temperature=${probability_temperature},cfg_scale=${cfg_scale},suppress_tokens=${suppress_tokens},begin_suppress_tokens=${begin_suppress_tokens}"
 
 accelerate launch --num_processes 1 dllm/pipelines/llada/eval.py \
     --tasks gsm8k_cot \
-    --num_fewshot 5 \
+    --num_fewshot "${num_fewshot}" \
     --model llada \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
-    --model_args "pretrained=GSAI-ML/LLaDA-8B-Instruct,max_new_tokens=512,steps=128,block_size=32,cfg_scale=0.0,suppress_tokens=[],begin_suppress_tokens=[126081;126348]"
+    --model_args "${MODEL_ARGS}"
 
 python scripts/tse/log_eval_to_wandb.py \
     --result-path "${RESULT_PATH}" \
-    --run-name "tse-gsm8k-instruct-baseline-${SLURM_JOB_ID}" \
+    --run-name "${RUN_NAME}" \
     --mode instruct_baseline \
-    --model-a "GSAI-ML/LLaDA-8B-Instruct"
+    --model-a "${model_name_or_path}" \
+    --probability-temperature "${probability_temperature}" \
+    --config-path "${CONFIG_PATH}"
