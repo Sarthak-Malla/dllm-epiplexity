@@ -3,7 +3,12 @@
 import pytest
 import torch
 
-from dllm.pipelines.tse.divergence import agreement_factor, entropy, jensen_shannon_divergence
+from dllm.pipelines.tse.divergence import (
+    agreement_factor,
+    entropy,
+    generalized_jensen_shannon_divergence,
+    jensen_shannon_divergence,
+)
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
 from dllm.pipelines.tse.selection import commit_tokens, select_positions
 
@@ -79,3 +84,19 @@ def test_selection_rejects_excess_transfer_count():
             torch.tensor([[0, 2]]),
             torch.tensor([2]),
         )
+
+
+def test_generalized_jsd_supports_m_way_probabilities():
+    probabilities = [
+        torch.tensor([[1.0, 0.0]]),
+        torch.tensor([[0.0, 1.0]]),
+        torch.tensor([[0.5, 0.5]]),
+    ]
+
+    divergence = generalized_jensen_shannon_divergence(
+        probabilities, [0.25, 0.25, 0.5]
+    )
+
+    assert divergence.shape == (1,)
+    assert torch.isfinite(divergence).all()
+    assert divergence.item() > 0

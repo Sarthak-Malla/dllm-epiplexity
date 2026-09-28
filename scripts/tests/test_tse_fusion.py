@@ -3,7 +3,11 @@
 import pytest
 import torch
 
-from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
+from dllm.pipelines.tse.fusion import (
+    fuse_distributions,
+    fuse_probabilities,
+    logits_to_probabilities,
+)
 
 
 def test_temperature_one_matches_softmax():
@@ -70,3 +74,15 @@ def test_fusion_rejects_invalid_alpha_and_shapes():
 
     with pytest.raises(ValueError, match="identical shapes"):
         fuse_probabilities(torch.ones(1, 2), torch.ones(1, 3))
+
+
+def test_collection_fusion_supports_m_way_global_weights():
+    probabilities = [
+        torch.tensor([[1.0, 0.0]]),
+        torch.tensor([[0.0, 1.0]]),
+        torch.tensor([[0.5, 0.5]]),
+    ]
+
+    fused = fuse_distributions(probabilities, [0.2, 0.3, 0.5])
+
+    assert torch.allclose(fused, torch.tensor([[0.45, 0.55]]))

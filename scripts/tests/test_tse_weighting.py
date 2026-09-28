@@ -5,6 +5,7 @@ import torch
 
 from dllm.pipelines.tse.weighting import (
     online_entropy_weights,
+    online_entropy_model_weights,
     per_token_margin_weights,
     static_weights,
 )
@@ -58,6 +59,21 @@ def test_per_token_margin_equal_margins_get_equal_weights():
 
     assert torch.allclose(result.weights_a, torch.tensor([0.5]))
     assert torch.allclose(result.weights_b, torch.tensor([0.5]))
+
+
+def test_m_way_entropy_weights_are_normalized():
+    probabilities = [
+        torch.tensor([[1.0, 0.0]]),
+        torch.tensor([[0.75, 0.25]]),
+        torch.tensor([[0.5, 0.5]]),
+    ]
+
+    weights, diagnostics = online_entropy_model_weights(probabilities)
+
+    assert weights.shape == (1, 3)
+    assert torch.allclose(weights.sum(dim=-1), torch.ones(1))
+    assert weights[0, 0] > weights[0, 2]
+    assert diagnostics["mean_entropies"].shape == (3,)
 
 
 @pytest.mark.parametrize("weight_temperature", [0.0, -1.0])

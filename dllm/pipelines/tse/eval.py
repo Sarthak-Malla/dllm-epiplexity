@@ -1,4 +1,8 @@
-"""lm-eval entrypoint for synchronized LLaDA Base/Instruct TSE."""
+"""lm-eval entrypoint for homogeneous or CTCA-aligned TSE.
+
+Run with:
+    python -m dllm.pipelines.tse.eval --model tse_llada --model_args ...
+"""
 
 from dataclasses import dataclass
 
@@ -12,7 +16,18 @@ from tqdm import tqdm
 
 from dllm.pipelines.tse.loader import load_tse_models
 from dllm.pipelines.tse.models import TSEConfig
+from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
 from dllm.pipelines.tse.sampler import TSESampler
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        if value.casefold() in {"true", "1", "yes"}:
+            return True
+        if value.casefold() in {"false", "0", "no"}:
+            return False
+        raise ValueError(f"Invalid boolean model argument: {value}")
+    return bool(value)
 
 
 @dataclass
@@ -35,8 +50,8 @@ class TSEEvalHarness(LM):
             block_size=int(kwargs.get("block_size", 128)),
             temperature=float(kwargs.get("temperature", 0.0)),
             remasking=kwargs.get("remasking", "low_confidence"),
-            stochastic_transfer=kwargs.get("stochastic_transfer", False),
-            capture_logits=kwargs.get("capture_logits", False),
+            stochastic_transfer=_as_bool(kwargs.get("stochastic_transfer", False)),
+            capture_logits=_as_bool(kwargs.get("capture_logits", False)),
             alpha=float(kwargs.get("alpha", 0.5)),
             temperature_a=float(kwargs.get("temperature_a", 1.0)),
             temperature_b=float(kwargs.get("temperature_b", 1.0)),
@@ -44,7 +59,17 @@ class TSEEvalHarness(LM):
             fusion_device=kwargs.get("fusion_device", "cuda:0"),
             weighting_mode=kwargs.get("weighting_mode", "static"),
             weight_temperature=float(kwargs.get("weight_temperature", 1.0)),
-            normalize_entropy=kwargs.get("normalize_entropy", True),
+            normalize_entropy=_as_bool(kwargs.get("normalize_entropy", True)),
+            ctca_enabled=_as_bool(kwargs.get("ctca_enabled", False)),
+            master_model=kwargs.get("master_model", "a"),
+            ctca_cache_dir=kwargs.get("ctca_cache_dir", ".cache/ctca"),
+            ctca_force_rebuild=_as_bool(kwargs.get("ctca_force_rebuild", False)),
+            ctca_projection_temperature=float(
+                kwargs.get("ctca_projection_temperature", 0.05)
+            ),
+            ctca_chunk_size=int(kwargs.get("ctca_chunk_size", 2500)),
+            ctca_num_anchors=int(kwargs.get("ctca_num_anchors", 3000)),
+            ctca_min_anchors=int(kwargs.get("ctca_min_anchors", 128)),
         )
         self.selection_mode = kwargs.get("selection_mode", "tse")
         self.baseline_model = kwargs.get("baseline_model", "b")
@@ -58,16 +83,58 @@ class TSEEvalHarness(LM):
             )
 
         models = load_tse_models(self.config)
-        self.tokenizer = models.tokenizer
-        self.sampler = TSESampler(
-            models.model_a,
-            models.model_b,
-            self.tokenizer,
-            self.config.model_a_device,
-            self.config.model_b_device,
-        )
+        self.auxiliary_tokenizer = None
+        if self.config.ctca_enabled:
+            auxiliary_name = "b" if self.config.master_model == "a" else "a"
+            self.tokenizer = models.tokenizer_for(self.config.master_model)
+            self.auxiliary_tokenizer = models.tokenizer_for(auxiliary_name)
+            master_device = getattr(
+                self.config, f"model_{self.config.master_model}_device"
+            )
+            auxiliary_device = getattr(self.config, f"model_{auxiliary_name}_device")
+            self.sampler = CTCATSESampler(
+                models.model_for(self.config.master_model),
+                models.model_for(auxiliary_name),
+                self.tokenizer,
+                self.auxiliary_tokenizer,
+                master_device,
+                auxiliary_device,
+                master_id=self.config.master_model,
+                auxiliary_id=auxiliary_name,
+                cache_dir=self.config.ctca_cache_dir,
+                force_rebuild=self.config.ctca_force_rebuild,
+                projection_temperature=self.config.ctca_projection_temperature,
+                projection_chunk_size=self.config.ctca_chunk_size,
+                num_anchors=self.config.ctca_num_anchors,
+                min_anchors=self.config.ctca_min_anchors,
+                master_cache_id=(
+                    self.config.model_a_path
+                    if self.config.master_model == "a"
+                    else self.config.model_b_path
+                ),
+                auxiliary_cache_id=(
+                    self.config.model_b_path
+                    if auxiliary_name == "b"
+                    else self.config.model_a_path
+                ),
+            )
+        else:
+            self.tokenizer = models.tokenizer
+            self.sampler = TSESampler(
+                models.model_a,
+                models.model_b,
+                self.tokenizer,
+                self.config.model_a_device,
+                self.config.model_b_device,
+            )
         self.batch_size = int(kwargs.get("batch_size", 1))
-        self.device = torch.device(self.config.model_a_device)
+        active_device = (
+            getattr(self.config, f"model_{self.config.master_model}_device")
+            if self.config.ctca_enabled
+            else self.config.model_a_device
+        )
+        self.device = torch.device(active_device)
+        self._auxiliary_chat_prompts: dict[str, str] = {}
 
     @property
     def rank(self) -> int:
@@ -86,12 +153,21 @@ class TSEEvalHarness(LM):
         chat_history: list[dict[str, str]],
         add_generation_prompt: bool = True,
     ) -> str:
-        return self.tokenizer.apply_chat_template(
+        master_prompt = self.tokenizer.apply_chat_template(
             chat_history,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=not add_generation_prompt,
         )
+        if self.auxiliary_tokenizer is not None:
+            auxiliary_prompt = self.auxiliary_tokenizer.apply_chat_template(
+                chat_history,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=not add_generation_prompt,
+            )
+            self._auxiliary_chat_prompts[master_prompt] = auxiliary_prompt
+        return master_prompt
 
     @torch.no_grad()
     def generate_until(self, requests: list[Instance]) -> list[str]:
@@ -106,8 +182,23 @@ class TSEEvalHarness(LM):
                 self.tokenizer(context, return_tensors="pt")["input_ids"][0]
                 for context in contexts
             ]
+            auxiliary_prompts = None
+            if self.auxiliary_tokenizer is not None:
+                auxiliary_prompts = [
+                    self.auxiliary_tokenizer(
+                        self._auxiliary_chat_prompts.get(context, context),
+                        return_tensors="pt",
+                    )["input_ids"][0]
+                    for context in contexts
+                ]
+            sampler_inputs = (
+                {"auxiliary_inputs": auxiliary_prompts}
+                if auxiliary_prompts is not None
+                else {}
+            )
             generated = self.sampler.sample(
                 prompts,
+                **sampler_inputs,
                 max_new_tokens=self.config.max_new_tokens,
                 steps=self.config.steps,
                 block_size=self.config.block_size,

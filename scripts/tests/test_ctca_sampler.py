@@ -1,0 +1,126 @@
+"""Run with: pytest scripts/tests/test_ctca_sampler.py -v"""
+
+from types import SimpleNamespace
+
+import torch
+
+from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
+from dllm.pipelines.tse.sampler import TSESampler
+
+
+class CharacterTokenizer:
+    def __init__(self, ordinary_tokens, mask_token, pad_token):
+        tokens = ordinary_tokens + [pad_token, mask_token]
+        self._vocab = {token: index for index, token in enumerate(tokens)}
+        self._tokens = tokens
+        self.mask_token_id = self._vocab[mask_token]
+        self.pad_token_id = self._vocab[pad_token]
+        self.eos_token_id = self.pad_token_id
+        self.unk_token_id = 0
+        self.all_special_ids = [self.pad_token_id, self.mask_token_id]
+
+    def get_vocab(self):
+        return dict(self._vocab)
+
+    def decode(self, token_ids, **kwargs):
+        return "".join(
+            self._tokens[int(token_id)]
+            for token_id in token_ids
+            if int(token_id) not in self.all_special_ids
+        )
+
+    def __call__(self, text, *, return_offsets_mapping=False, **kwargs):
+        ids = []
+        offsets = []
+        for index, character in enumerate(text):
+            if character in self._vocab and self._vocab[character] not in self.all_special_ids:
+                ids.append(self._vocab[character])
+                offsets.append((index, index + 1))
+        result = {"input_ids": ids}
+        if return_offsets_mapping:
+            result["offset_mapping"] = offsets
+        return result
+
+
+class FixedMaskedModel(torch.nn.Module):
+    def __init__(self, vocab_size, hidden_size=3):
+        super().__init__()
+        self.config = SimpleNamespace(vocab_size=vocab_size)
+        self.embeddings = torch.nn.Embedding(vocab_size, hidden_size)
+        torch.manual_seed(vocab_size)
+        torch.nn.init.normal_(self.embeddings.weight)
+
+    def get_input_embeddings(self):
+        return self.embeddings
+
+    def forward(self, input_ids, attention_mask=None):
+        logits = torch.zeros(
+            *input_ids.shape,
+            self.config.vocab_size,
+            dtype=torch.float32,
+            device=input_ids.device,
+        )
+        logits[..., 0] = 8.0
+        return SimpleNamespace(logits=logits)
+
+
+def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    master_model = FixedMaskedModel(len(master_tokenizer.get_vocab()))
+    auxiliary_model = FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()))
+    sampler = CTCATSESampler(
+        master_model,
+        auxiliary_model,
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+
+    generated = sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+        capture_logits=True,
+    )
+
+    output = generated[0, 1:]
+    assert output.shape == (2,)
+    assert not torch.any(output == master_tokenizer.mask_token_id)
+    assert output.max() < len(master_tokenizer.get_vocab())
+    assert sampler.last_aligned_probabilities
+    master_probabilities = sampler.last_aligned_probabilities[0][1]
+    auxiliary_probabilities = sampler.last_aligned_probabilities[0][2]
+    assert master_probabilities.shape == auxiliary_probabilities.shape
+
+
+def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    model_a = FixedMaskedModel(len(tokenizer.get_vocab()))
+    model_b = FixedMaskedModel(len(tokenizer.get_vocab()))
+    sampler = TSESampler(model_a, model_b, tokenizer, "cpu", "cpu")
+
+    generated = sampler.sample(
+        [torch.tensor([0])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+    )
+
+    output = generated[0, 1:]
+    assert output.tolist() == [0, 0]
+    assert not torch.any(output == tokenizer.mask_token_id)

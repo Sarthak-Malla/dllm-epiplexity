@@ -5,6 +5,8 @@ Run from the repository root with:
     python scripts/tse/smoke.py \
         --model-a GSAI-ML/LLaDA-8B-Base \
         --model-b GSAI-ML/LLaDA-8B-Instruct
+
+Add ``--ctca --master-model a`` when the models use different tokenizers.
 """
 
 import argparse
@@ -27,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-b", required=True)
     parser.add_argument("--model-a-device", default="cuda:0")
     parser.add_argument("--model-b-device", default="cuda:1")
+    parser.add_argument("--fusion-device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--steps", type=int, default=16)
@@ -47,12 +50,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--temperature-a", type=float, default=1.0)
     parser.add_argument("--temperature-b", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--remasking",
+        choices=("low_confidence", "random"),
+        default="low_confidence",
+    )
     parser.add_argument(
         "--weighting-mode",
         choices=("static", "online_entropy", "per_token_margin"),
         default="static",
     )
     parser.add_argument("--weight-temperature", type=float, default=1.0)
+    parser.add_argument("--ctca", action="store_true")
+    parser.add_argument("--master-model", choices=("a", "b"), default="a")
+    parser.add_argument("--ctca-cache-dir", default=".cache/ctca")
+    parser.add_argument("--ctca-force-rebuild", action="store_true")
+    parser.add_argument("--ctca-projection-temperature", type=float, default=0.05)
+    parser.add_argument("--ctca-chunk-size", type=int, default=2500)
+    parser.add_argument("--ctca-num-anchors", type=int, default=3000)
+    parser.add_argument("--ctca-min-anchors", type=int, default=128)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
 
@@ -118,10 +135,27 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         steps=args.steps,
         block_size=args.block_size,
+        temperature=args.temperature,
+        remasking=args.remasking,
         capture_logits=True,
+        fusion_device=args.fusion_device or args.model_a_device,
+        ctca_enabled=args.ctca,
+        master_model=args.master_model,
+        ctca_cache_dir=args.ctca_cache_dir,
+        ctca_force_rebuild=args.ctca_force_rebuild,
+        ctca_projection_temperature=args.ctca_projection_temperature,
+        ctca_chunk_size=args.ctca_chunk_size,
+        ctca_num_anchors=args.ctca_num_anchors,
+        ctca_min_anchors=args.ctca_min_anchors,
     )
     models = load_tse_models(config)
-    tokenizer = models.tokenizer
+    auxiliary_name = "b" if args.master_model == "a" else "a"
+    tokenizer = (
+        models.tokenizer_for(args.master_model) if args.ctca else models.tokenizer
+    )
+    auxiliary_tokenizer = (
+        models.tokenizer_for(auxiliary_name) if args.ctca else None
+    )
 
     print("\nModel A:", args.model_a)
     print("  model_type:", models.model_a.config.model_type)
@@ -143,28 +177,70 @@ def main() -> None:
         return_tensors="pt",
     )[0]
     prompt_ids = torch.as_tensor(prompt_ids)
+    auxiliary_prompt_ids = None
+    if auxiliary_tokenizer is not None:
+        auxiliary_prompt_ids = auxiliary_tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )[0]
+        auxiliary_prompt_ids = torch.as_tensor(auxiliary_prompt_ids)
     print("\nPrompt:", args.question)
     print("Prompt token count:", prompt_ids.numel())
     print("Prompt IDs:", prompt_ids.tolist())
 
-    sampler = TSESampler(
-        models.model_a,
-        models.model_b,
-        tokenizer,
-        args.model_a_device,
-        args.model_b_device,
+    if args.ctca:
+        from dllm.pipelines.tse import CTCATSESampler
+
+        master_device = getattr(args, f"model_{args.master_model}_device")
+        auxiliary_device = getattr(args, f"model_{auxiliary_name}_device")
+        sampler = CTCATSESampler(
+            models.model_for(args.master_model),
+            models.model_for(auxiliary_name),
+            tokenizer,
+            auxiliary_tokenizer,
+            master_device,
+            auxiliary_device,
+            master_id=args.master_model,
+            auxiliary_id=auxiliary_name,
+            cache_dir=args.ctca_cache_dir,
+            force_rebuild=args.ctca_force_rebuild,
+            projection_temperature=args.ctca_projection_temperature,
+            projection_chunk_size=args.ctca_chunk_size,
+            num_anchors=args.ctca_num_anchors,
+            min_anchors=args.ctca_min_anchors,
+            master_cache_id=getattr(args, f"model_{args.master_model}"),
+            auxiliary_cache_id=getattr(args, f"model_{auxiliary_name}"),
+        )
+    else:
+        sampler = TSESampler(
+            models.model_a,
+            models.model_b,
+            tokenizer,
+            args.model_a_device,
+            args.model_b_device,
+        )
+    sampler_inputs = (
+        {"auxiliary_inputs": [auxiliary_prompt_ids]}
+        if auxiliary_prompt_ids is not None
+        else {}
     )
     generated = sampler.sample(
         [prompt_ids],
+        **sampler_inputs,
         max_new_tokens=config.max_new_tokens,
         steps=config.steps,
         block_size=config.block_size,
+        temperature=config.temperature,
+        remasking=config.remasking,
         capture_logits=True,
         baseline_model=args.baseline_model,
         selection_mode=args.selection_mode,
         alpha=args.alpha,
         temperature_a=args.temperature_a,
         temperature_b=args.temperature_b,
+        fusion_device=config.fusion_device,
         weighting_mode=args.weighting_mode,
         weight_temperature=args.weight_temperature,
     )
@@ -172,9 +248,13 @@ def main() -> None:
     print("Baseline commit model:", args.baseline_model)
     print("Selection mode:", args.selection_mode)
     print("Weighting mode:", args.weighting_mode)
-    print("Captured forward steps:", len(sampler.last_paired_logits))
-    if sampler.last_paired_logits:
-        print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)
+    if args.ctca:
+        aligned = sampler.last_aligned_probabilities
+        print("Captured aligned steps:", len(aligned))
+    else:
+        print("Captured forward steps:", len(sampler.last_paired_logits))
+        if sampler.last_paired_logits:
+            print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)
     print("\nDecoded canvas:")
     print(tokenizer.decode(generated[0].tolist(), skip_special_tokens=False))
 

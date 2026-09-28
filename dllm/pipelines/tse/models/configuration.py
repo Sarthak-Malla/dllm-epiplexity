@@ -1,4 +1,8 @@
-"""Configuration for synchronized two-model TSE inference."""
+"""Configuration for synchronized two-model TSE inference.
+
+Run an evaluation with:
+    python -m dllm.pipelines.tse.eval --model tse_llada --model_args ...
+"""
 
 from dataclasses import dataclass
 
@@ -27,3 +31,11 @@ class TSEConfig:
     weighting_mode: str = "static"
     weight_temperature: float = 1.0
     normalize_entropy: bool = True
+    ctca_enabled: bool = False
+    master_model: str = "a"
+    ctca_cache_dir: str | None = ".cache/ctca"
+    ctca_force_rebuild: bool = False
+    ctca_projection_temperature: float = 0.05
+    ctca_chunk_size: int = 2500
+    ctca_num_anchors: int = 3000
+    ctca_min_anchors: int = 128
