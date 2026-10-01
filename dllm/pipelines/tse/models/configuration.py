@@ -37,5 +37,7 @@ class TSEConfig:
     ctca_force_rebuild: bool = False
     ctca_projection_temperature: float = 0.05
     ctca_chunk_size: int = 2500
+    ctca_projection_mode: str = "exact"
+    ctca_projection_top_k: int = 64
     ctca_num_anchors: int = 3000
     ctca_min_anchors: int = 128

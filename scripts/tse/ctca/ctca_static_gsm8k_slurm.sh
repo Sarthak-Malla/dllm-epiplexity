@@ -2,9 +2,9 @@
 #SBATCH --job-name=ctca-gsm8k-static
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=20:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54
+#SBATCH --exclude=gpu-05,gpu-54,gpu-51
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -23,6 +23,13 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
     exit 1
 fi
 source "${CONFIG_PATH}"
+
+# Preserve existing configurations that do not specify an evaluation batch size.
+batch_size="${batch_size:-1}"
+progress_wandb="${progress_wandb:-false}"
+progress_wandb_project="${progress_wandb_project:-dllm-tse}"
+progress_wandb_entity="${progress_wandb_entity:-}"
+progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -52,10 +59,16 @@ source "${CONFIG_PATH}"
 : "${ctca_force_rebuild:?ctca_force_rebuild is required}"
 : "${ctca_projection_temperature:?ctca_projection_temperature is required}"
 : "${ctca_chunk_size:?ctca_chunk_size is required}"
+: "${ctca_projection_mode:?ctca_projection_mode is required}"
+: "${ctca_projection_top_k:?ctca_projection_top_k is required}"
 : "${ctca_num_anchors:?ctca_num_anchors is required}"
 : "${ctca_min_anchors:?ctca_min_anchors is required}"
 : "${task:?task is required}"
 : "${num_fewshot:?num_fewshot is required}"
+: "${batch_size:?batch_size is required}"
+: "${progress_wandb:?progress_wandb is required}"
+: "${progress_wandb_project:?progress_wandb_project is required}"
+: "${progress_wandb_log_interval:?progress_wandb_log_interval is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -74,12 +87,17 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 RESULT_PATH=".logs/ctca_${task}_${experiment_name}_${SLURM_JOB_ID}.json"
 RUN_NAME="ctca-${task}-${experiment_name}-${SLURM_JOB_ID}"
 
-MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
+MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
+MODEL_ARGS="${MODEL_ARGS},progress_wandb=${progress_wandb},progress_wandb_project=${progress_wandb_project},progress_wandb_run_name=${RUN_NAME}-progress,progress_wandb_log_interval=${progress_wandb_log_interval}"
+if [[ -n "${progress_wandb_entity}" ]]; then
+    MODEL_ARGS="${MODEL_ARGS},progress_wandb_entity=${progress_wandb_entity}"
+fi
 
 accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
     --tasks "${task}" \
     --num_fewshot "${num_fewshot}" \
     --model tse_llada \
+    --batch_size "${batch_size}" \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
     --model_args "${MODEL_ARGS}"

@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctca-force-rebuild", action="store_true")
     parser.add_argument("--ctca-projection-temperature", type=float, default=0.05)
     parser.add_argument("--ctca-chunk-size", type=int, default=2500)
+    parser.add_argument(
+        "--ctca-projection-mode",
+        choices=("exact", "sparse_topk"),
+        default="exact",
+    )
+    parser.add_argument("--ctca-projection-top-k", type=int, default=64)
     parser.add_argument("--ctca-num-anchors", type=int, default=3000)
     parser.add_argument("--ctca-min-anchors", type=int, default=128)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
@@ -145,6 +151,8 @@ def main() -> None:
         ctca_force_rebuild=args.ctca_force_rebuild,
         ctca_projection_temperature=args.ctca_projection_temperature,
         ctca_chunk_size=args.ctca_chunk_size,
+        ctca_projection_mode=args.ctca_projection_mode,
+        ctca_projection_top_k=args.ctca_projection_top_k,
         ctca_num_anchors=args.ctca_num_anchors,
         ctca_min_anchors=args.ctca_min_anchors,
     )
@@ -208,6 +216,8 @@ def main() -> None:
             force_rebuild=args.ctca_force_rebuild,
             projection_temperature=args.ctca_projection_temperature,
             projection_chunk_size=args.ctca_chunk_size,
+            projection_mode=args.ctca_projection_mode,
+            projection_top_k=args.ctca_projection_top_k,
             num_anchors=args.ctca_num_anchors,
             min_anchors=args.ctca_min_anchors,
             master_cache_id=getattr(args, f"model_{args.master_model}"),

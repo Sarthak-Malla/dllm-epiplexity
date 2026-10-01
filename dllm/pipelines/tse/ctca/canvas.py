@@ -9,6 +9,8 @@ from typing import Sequence
 
 import torch
 
+from dllm.pipelines.tse.utils import timer
+
 
 Span = tuple[float, float]
 
@@ -111,20 +113,53 @@ def spatial_warp_probabilities(
     return torch.sparse.mm(overlap.transpose(0, 1), probabilities_aux)
 
 
-def _encode_without_special_tokens(tokenizer, text: str) -> tuple[list[int], list[Span]]:
+def encode_with_offsets(tokenizer, text: str) -> tuple[list[int], list[Span]]:
+    """Encode text and return offsets, including for compatible slow tokenizers."""
     if not text:
         return [], []
-    encoded = tokenizer(
-        text,
-        add_special_tokens=False,
-        return_offsets_mapping=True,
-    )
+    try:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offsets = encoded.get("offset_mapping")
+    except (NotImplementedError, TypeError, ValueError):
+        encoded = tokenizer(text, add_special_tokens=False)
+        offsets = None
+
     input_ids = encoded["input_ids"]
-    offsets = encoded["offset_mapping"]
     if input_ids and isinstance(input_ids[0], list):
         input_ids = input_ids[0]
-        offsets = offsets[0]
-    return [int(token_id) for token_id in input_ids], [tuple(map(float, x)) for x in offsets]
+        if offsets is not None:
+            offsets = offsets[0]
+    token_ids = [int(token_id) for token_id in input_ids]
+    if offsets is None:
+        return token_ids, _slow_tokenizer_offsets(tokenizer, token_ids, text)
+    return token_ids, [tuple(map(float, span)) for span in offsets]
+
+
+def _slow_tokenizer_offsets(
+    tokenizer, input_ids: Sequence[int], text: str
+) -> list[Span]:
+    """Infer character offsets from decoded prefixes for slow tokenizers."""
+    boundaries = [0]
+    for end in range(1, len(input_ids) + 1):
+        decoded_prefix = _decode(tokenizer, input_ids[:end])
+        common_length = 0
+        for actual, decoded in zip(text, decoded_prefix):
+            if actual != decoded:
+                break
+            common_length += 1
+        boundaries.append(max(boundaries[-1], common_length))
+
+    if _decode(tokenizer, input_ids) != text:
+        raise ValueError("slow tokenizer must round-trip text to derive CTCA offsets")
+    boundaries[-1] = len(text)
+    return [
+        (float(start), float(end))
+        for start, end in zip(boundaries, boundaries[1:])
+    ]
 
 
 def _decode(tokenizer, token_ids: Sequence[int]) -> str:
@@ -160,6 +195,7 @@ def _character_to_logical(
     return float(logical_start + len(boundaries) - 1)
 
 
+@timer()
 def build_model_canvas_view(
     native_prompt_ids: torch.Tensor | Sequence[int],
     master_generated_ids: torch.Tensor | Sequence[int],
@@ -169,57 +205,69 @@ def build_model_canvas_view(
     master_mask_token_id: int,
     model_mask_token_id: int,
 ) -> ModelCanvasView:
-    """Derive a native model view without rendering masks as placeholder text.
+    """Derive a native model view.
 
     Committed master runs are decoded and retokenized by the target tokenizer.
     Every unresolved logical slot is represented by exactly one native mask ID.
     """
-    prompt_ids = torch.as_tensor(native_prompt_ids, dtype=torch.long).flatten().tolist()
-    generated_ids = (
-        torch.as_tensor(master_generated_ids, dtype=torch.long).flatten().tolist()
-    )
-    if model_mask_token_id is None:
-        raise ValueError("model_tokenizer must define mask_token_id")
+    with timer("ctca.canvas.input_conversion"):
+        prompt_ids = torch.as_tensor(native_prompt_ids, dtype=torch.long).flatten().tolist()
+        generated_ids = (
+            torch.as_tensor(master_generated_ids, dtype=torch.long).flatten().tolist()
+        )
+        if model_mask_token_id is None:
+            raise ValueError("model_tokenizer must define mask_token_id")
 
     native_generated_ids: list[int] = []
     native_offsets: list[Span] = []
-    index = 0
-    while index < len(generated_ids):
-        if generated_ids[index] == master_mask_token_id:
-            native_generated_ids.append(int(model_mask_token_id))
-            native_offsets.append((float(index), float(index + 1)))
-            index += 1
-            continue
+    with timer("ctca.canvas.build_native_generation"):
+        index = 0
+        while index < len(generated_ids):
+            if generated_ids[index] == master_mask_token_id:
+                native_generated_ids.append(int(model_mask_token_id))
+                native_offsets.append((float(index), float(index + 1)))
+                index += 1
+                continue
 
-        run_start = index
-        while index < len(generated_ids) and generated_ids[index] != master_mask_token_id:
-            index += 1
-        run_ids = generated_ids[run_start:index]
-        run_text = _decode(master_tokenizer, run_ids)
-        encoded_ids, character_offsets = _encode_without_special_tokens(
-            model_tokenizer, run_text
-        )
-        if not encoded_ids:
-            fallback_id = getattr(model_tokenizer, "unk_token_id", None)
-            if fallback_id is None:
-                raise ValueError("committed text produced no auxiliary token IDs")
-            encoded_ids = [int(fallback_id)]
-            character_offsets = [(0.0, float(max(1, len(run_text))))]
-
-        boundaries = _prefix_boundaries(master_tokenizer, run_ids)
-        native_generated_ids.extend(encoded_ids)
-        for start, end in character_offsets:
-            native_offsets.append(
-                (
-                    _character_to_logical(start, boundaries, run_start),
-                    _character_to_logical(end, boundaries, run_start),
+            run_start = index
+            while (
+                index < len(generated_ids)
+                and generated_ids[index] != master_mask_token_id
+            ):
+                index += 1
+            run_ids = generated_ids[run_start:index]
+            with timer("ctca.canvas.decode_committed_run"):
+                run_text = _decode(master_tokenizer, run_ids)
+            with timer("ctca.canvas.retokenize_committed_run"):
+                encoded_ids, character_offsets = encode_with_offsets(
+                    model_tokenizer, run_text
                 )
-            )
+            if not encoded_ids:
+                fallback_id = getattr(model_tokenizer, "unk_token_id", None)
+                if fallback_id is None:
+                    raise ValueError("committed text produced no auxiliary token IDs")
+                encoded_ids = [int(fallback_id)]
+                character_offsets = [(0.0, float(max(1, len(run_text))))]
 
-    all_ids = torch.tensor(prompt_ids + native_generated_ids, dtype=torch.long)
-    attention_mask = torch.ones_like(all_ids)
-    master_offsets = tuple((float(i), float(i + 1)) for i in range(len(generated_ids)))
-    overlap = build_canvas_overlap_matrix(native_offsets, master_offsets)
+            with timer("ctca.canvas.map_offsets_to_master_slots"):
+                boundaries = _prefix_boundaries(master_tokenizer, run_ids)
+                native_generated_ids.extend(encoded_ids)
+                for start, end in character_offsets:
+                    native_offsets.append(
+                        (
+                            _character_to_logical(start, boundaries, run_start),
+                            _character_to_logical(end, boundaries, run_start),
+                        )
+                    )
+
+    with timer("ctca.canvas.finalize_view"):
+        all_ids = torch.tensor(prompt_ids + native_generated_ids, dtype=torch.long)
+        attention_mask = torch.ones_like(all_ids)
+        master_offsets = tuple(
+            (float(i), float(i + 1)) for i in range(len(generated_ids))
+        )
+    with timer("ctca.canvas.overlap_matrix"):
+        overlap = build_canvas_overlap_matrix(native_offsets, master_offsets)
     return ModelCanvasView(
         input_ids=all_ids,
         attention_mask=attention_mask,

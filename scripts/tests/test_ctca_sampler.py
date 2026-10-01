@@ -107,6 +107,91 @@ def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
     assert master_probabilities.shape == auxiliary_probabilities.shape
 
 
+def test_ctca_sampler_projects_only_current_block_for_static_weighting():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master_tokenizer.get_vocab())),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab())),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+
+    sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=4,
+        steps=4,
+        block_size=2,
+        selection_mode="tse",
+        weighting_mode="static",
+        capture_logits=True,
+    )
+
+    active_positions, master_probabilities, auxiliary_probabilities = (
+        sampler.last_aligned_probabilities[0]
+    )
+    assert active_positions.tolist() == [[0, 1], [0, 2]]
+    assert master_probabilities.shape == (2, len(master_tokenizer.get_vocab()))
+    assert auxiliary_probabilities.shape == master_probabilities.shape
+
+
+def test_ctca_sampler_runs_sparse_topk_projection_backend():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master_tokenizer.get_vocab())),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab())),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        projection_mode="sparse_topk",
+        projection_top_k=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+
+    generated = sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+        weighting_mode="static",
+        capture_logits=True,
+    )
+
+    assert not torch.any(generated[0, 1:] == master_tokenizer.mask_token_id)
+    assert sampler.last_aligned_probabilities[0][1].shape == (
+        2,
+        len(master_tokenizer.get_vocab()),
+    )
+    assert sampler.last_aligned_probabilities[0][2].shape == (
+        2,
+        len(master_tokenizer.get_vocab()),
+    )
+
+
 def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():
     tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
     model_a = FixedMaskedModel(len(tokenizer.get_vocab()))

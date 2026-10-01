@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54
+#SBATCH --exclude=gpu-05,gpu-54,gpu-51
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -23,6 +23,9 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
     exit 1
 fi
 source "${CONFIG_PATH}"
+
+# Preserve existing configurations that do not specify an evaluation batch size.
+batch_size="${batch_size:-1}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -43,6 +46,7 @@ source "${CONFIG_PATH}"
 : "${temperature:?temperature is required}"
 : "${remasking:?remasking is required}"
 : "${num_fewshot:?num_fewshot is required}"
+: "${batch_size:?batch_size is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -67,6 +71,7 @@ accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
     --tasks gsm8k_cot \
     --num_fewshot "${num_fewshot}" \
     --model tse_llada \
+    --batch_size "${batch_size}" \
     --apply_chat_template \
     --output_path "${RESULT_PATH}" \
     --model_args "${MODEL_ARGS}"

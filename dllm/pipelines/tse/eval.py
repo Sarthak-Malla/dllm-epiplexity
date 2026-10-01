@@ -4,7 +4,10 @@ Run with:
     python -m dllm.pipelines.tse.eval --model tse_llada --model_args ...
 """
 
+import atexit
 from dataclasses import dataclass
+import os
+import time
 
 import accelerate
 import torch
@@ -68,11 +71,31 @@ class TSEEvalHarness(LM):
                 kwargs.get("ctca_projection_temperature", 0.05)
             ),
             ctca_chunk_size=int(kwargs.get("ctca_chunk_size", 2500)),
+            ctca_projection_mode=kwargs.get("ctca_projection_mode", "exact"),
+            ctca_projection_top_k=int(kwargs.get("ctca_projection_top_k", 64)),
             ctca_num_anchors=int(kwargs.get("ctca_num_anchors", 3000)),
             ctca_min_anchors=int(kwargs.get("ctca_min_anchors", 128)),
         )
         self.selection_mode = kwargs.get("selection_mode", "tse")
         self.baseline_model = kwargs.get("baseline_model", "b")
+        self._progress_wandb_enabled = _as_bool(
+            kwargs.get("progress_wandb", False)
+        )
+        self._progress_wandb_project = kwargs.get(
+            "progress_wandb_project", os.environ.get("WANDB_PROJECT", "dllm-tse")
+        )
+        self._progress_wandb_entity = kwargs.get(
+            "progress_wandb_entity", os.environ.get("WANDB_ENTITY")
+        )
+        self._progress_wandb_run_name = kwargs.get(
+            "progress_wandb_run_name", "tse-progress"
+        )
+        self._progress_wandb_log_interval = int(
+            kwargs.get("progress_wandb_log_interval", 1)
+        )
+        if self._progress_wandb_log_interval < 1:
+            raise ValueError("progress_wandb_log_interval must be positive")
+        self._progress_wandb_run = None
         accelerator = accelerate.Accelerator()
         self._rank = accelerator.process_index
         self._world_size = accelerator.num_processes
@@ -105,6 +128,8 @@ class TSEEvalHarness(LM):
                 force_rebuild=self.config.ctca_force_rebuild,
                 projection_temperature=self.config.ctca_projection_temperature,
                 projection_chunk_size=self.config.ctca_chunk_size,
+                projection_mode=self.config.ctca_projection_mode,
+                projection_top_k=self.config.ctca_projection_top_k,
                 num_anchors=self.config.ctca_num_anchors,
                 min_anchors=self.config.ctca_min_anchors,
                 master_cache_id=(
@@ -135,6 +160,8 @@ class TSEEvalHarness(LM):
         )
         self.device = torch.device(active_device)
         self._auxiliary_chat_prompts: dict[str, str] = {}
+        if self._progress_wandb_enabled and self.rank == 0:
+            self._init_progress_wandb()
 
     @property
     def rank(self) -> int:
@@ -147,6 +174,39 @@ class TSEEvalHarness(LM):
     @property
     def tokenizer_name(self) -> str:
         return self.tokenizer.name_or_path.replace("/", "__")
+
+    def _init_progress_wandb(self) -> None:
+        import wandb
+
+        config = {
+            "mode": "ctca" if self.config.ctca_enabled else "tse",
+            "selection_mode": self.selection_mode,
+            "baseline_model": self.baseline_model,
+            "weighting_mode": self.config.weighting_mode,
+            "model_a": self.config.model_a_path,
+            "model_b": self.config.model_b_path,
+            "batch_size": self.batch_size,
+            "max_new_tokens": self.config.max_new_tokens,
+            "steps": self.config.steps,
+            "block_size": self.config.block_size,
+            "ctca_enabled": self.config.ctca_enabled,
+            "ctca_projection_mode": self.config.ctca_projection_mode,
+            "ctca_projection_top_k": self.config.ctca_projection_top_k,
+        }
+        init_kwargs = {
+            "project": self._progress_wandb_project,
+            "name": self._progress_wandb_run_name,
+            "config": config,
+        }
+        if self._progress_wandb_entity:
+            init_kwargs["entity"] = self._progress_wandb_entity
+        self._progress_wandb_run = wandb.init(**init_kwargs)
+        atexit.register(self._finish_progress_wandb)
+
+    def _finish_progress_wandb(self) -> None:
+        if self._progress_wandb_run is not None:
+            self._progress_wandb_run.finish()
+            self._progress_wandb_run = None
 
     def apply_chat_template(
         self,
@@ -172,10 +232,14 @@ class TSEEvalHarness(LM):
     @torch.no_grad()
     def generate_until(self, requests: list[Instance]) -> list[str]:
         outputs = []
-        for start in tqdm(
-            range(0, len(requests), self.batch_size),
-            desc="TSE GSM8K generation",
+        request_count = len(requests)
+        batch_starts = range(0, request_count, self.batch_size)
+        total_batches = (request_count + self.batch_size - 1) // self.batch_size
+        generation_start_time = time.perf_counter()
+        for batch_index, start in enumerate(
+            tqdm(batch_starts, desc="TSE GSM8K generation"), start=1
         ):
+            batch_start_time = time.perf_counter()
             batch = requests[start : start + self.batch_size]
             contexts, generation_kwargs = zip(*[instance.args for instance in batch])
             prompts = [
@@ -218,6 +282,7 @@ class TSEEvalHarness(LM):
                 normalize_entropy=self.config.normalize_entropy,
             )
             answers = self.tokenizer.batch_decode(generated, skip_special_tokens=False)
+            answer_lengths = []
             for answer, prompt, kwargs_for_generation in zip(
                 answers, prompts, generation_kwargs
             ):
@@ -225,7 +290,42 @@ class TSEEvalHarness(LM):
                 for stop_sequence in kwargs_for_generation["until"]:
                     if stop_sequence in answer:
                         answer = answer.split(stop_sequence)[0]
+                answer_lengths.append(len(answer))
                 outputs.append(answer)
+            batch_seconds = time.perf_counter() - batch_start_time
+            if self._progress_wandb_run is not None and (
+                batch_index % self._progress_wandb_log_interval == 0
+                or len(outputs) == request_count
+            ):
+                elapsed = time.perf_counter() - generation_start_time
+                examples_done = len(outputs)
+                generated_tokens = len(batch) * self.config.max_new_tokens
+                average_seconds = elapsed / max(examples_done, 1)
+                remaining = request_count - examples_done
+                eta_seconds = average_seconds * remaining
+                self._progress_wandb_run.log(
+                    {
+                        "progress/examples_done": examples_done,
+                        "progress/examples_total": request_count,
+                        "progress/batches_done": batch_index,
+                        "progress/batches_total": total_batches,
+                        "progress/percent_done": examples_done
+                        / max(request_count, 1),
+                        "throughput/batch_seconds": batch_seconds,
+                        "throughput/examples_per_second": len(batch)
+                        / max(batch_seconds, 1e-9),
+                        "throughput/tokens_generated_per_second": generated_tokens
+                        / max(batch_seconds, 1e-9),
+                        "throughput/avg_seconds_per_example": average_seconds,
+                        "throughput/eta_minutes": eta_seconds / 60,
+                        "outputs/mean_answer_length_chars": (
+                            sum(answer_lengths) / len(answer_lengths)
+                            if answer_lengths
+                            else 0.0
+                        ),
+                    },
+                    step=batch_index,
+                )
         return outputs
 
     def loglikelihood(self, requests):

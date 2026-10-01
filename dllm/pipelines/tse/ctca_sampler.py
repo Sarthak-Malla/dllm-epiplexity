@@ -21,6 +21,7 @@ from dllm.pipelines.tse.weighting import (
     per_token_margin_weights,
     static_weights,
 )
+from dllm.pipelines.tse.utils import timer
 
 
 class CTCATSESampler:
@@ -41,6 +42,8 @@ class CTCATSESampler:
         force_rebuild: bool = False,
         projection_temperature: float = 0.05,
         projection_chunk_size: int = 2500,
+        projection_mode: str = "exact",
+        projection_top_k: int = 64,
         num_anchors: int = 3000,
         min_anchors: int = 128,
         master_cache_id: str | None = None,
@@ -51,8 +54,9 @@ class CTCATSESampler:
         if master_id == auxiliary_id:
             raise ValueError("master_id and auxiliary_id must be different")
 
-        self.master_model = master_model.to(master_device).eval()
-        self.auxiliary_model = auxiliary_model.to(auxiliary_device).eval()
+        with timer("ctca.init.model_to_device"):
+            self.master_model = master_model.to(master_device).eval()
+            self.auxiliary_model = auxiliary_model.to(auxiliary_device).eval()
         self.master_tokenizer = master_tokenizer
         self.auxiliary_tokenizer = auxiliary_tokenizer
         self.master_device = torch.device(master_device)
@@ -68,22 +72,25 @@ class CTCATSESampler:
         auxiliary_embeddings = (
             self.auxiliary_model.get_input_embeddings().weight.detach()
         )
-        self.aligner = CrossTokenizerAligner(
-            master_tokenizer,
-            master_embeddings,
-            master_id=master_cache_id or master_id,
-            cache_dir=cache_dir,
-            force_rebuild=force_rebuild,
-        )
-        self.aligner.register_auxiliary_model(
-            auxiliary_cache_id or auxiliary_id,
-            auxiliary_tokenizer,
-            auxiliary_embeddings,
-            temperature=projection_temperature,
-            chunk_size=projection_chunk_size,
-            num_anchors=num_anchors,
-            min_anchors=min_anchors,
-        )
+        with timer("ctca.init.aligner"):
+            self.aligner = CrossTokenizerAligner(
+                master_tokenizer,
+                master_embeddings,
+                master_id=master_cache_id or master_id,
+                cache_dir=cache_dir,
+                force_rebuild=force_rebuild,
+            )
+            self.aligner.register_auxiliary_model(
+                auxiliary_cache_id or auxiliary_id,
+                auxiliary_tokenizer,
+                auxiliary_embeddings,
+                temperature=projection_temperature,
+                chunk_size=projection_chunk_size,
+                projection_mode=projection_mode,
+                projection_top_k=projection_top_k,
+                num_anchors=num_anchors,
+                min_anchors=min_anchors,
+            )
         self._aligner_auxiliary_id = auxiliary_cache_id or auxiliary_id
 
     def _derive_auxiliary_prompt(self, master_prompt: torch.Tensor) -> torch.Tensor:
@@ -103,13 +110,27 @@ class CTCATSESampler:
         canvas: torch.Tensor,
         prompt_lens: Sequence[int],
         max_new_tokens: int,
+        *,
+        block_index: int | None = None,
+        block_size: int | None = None,
     ) -> torch.Tensor:
         mask = torch.zeros_like(canvas, dtype=torch.bool)
         for sample_index, prompt_len in enumerate(prompt_lens):
+            generation_start = 0
+            generation_end = max_new_tokens
+            if block_index is not None:
+                if block_size is None:
+                    raise ValueError("block_size is required when block_index is set")
+                generation_start = block_index * block_size
+                generation_end = min(generation_start + block_size, max_new_tokens)
             generated = canvas[
-                sample_index, prompt_len : prompt_len + max_new_tokens
+                sample_index,
+                prompt_len + generation_start : prompt_len + generation_end,
             ]
-            mask[sample_index, prompt_len : prompt_len + max_new_tokens] = (
+            mask[
+                sample_index,
+                prompt_len + generation_start : prompt_len + generation_end,
+            ] = (
                 generated == self.master_tokenizer.mask_token_id
             )
         return mask
@@ -122,39 +143,42 @@ class CTCATSESampler:
         max_new_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, list]:
         views = []
-        for sample_index, prompt_len in enumerate(prompt_lens):
-            generated = canvas[
-                sample_index, prompt_len : prompt_len + max_new_tokens
-            ].detach().cpu()
-            views.append(
-                build_model_canvas_view(
-                    auxiliary_prompts[sample_index],
-                    generated,
-                    master_tokenizer=self.master_tokenizer,
-                    model_tokenizer=self.auxiliary_tokenizer,
-                    master_mask_token_id=self.master_tokenizer.mask_token_id,
-                    model_mask_token_id=self.auxiliary_tokenizer.mask_token_id,
+        with timer("ctca.auxiliary_batch.build_views"):
+            for sample_index, prompt_len in enumerate(prompt_lens):
+                generated = canvas[
+                    sample_index, prompt_len : prompt_len + max_new_tokens
+                ].detach().cpu()
+                views.append(
+                    build_model_canvas_view(
+                        auxiliary_prompts[sample_index],
+                        generated,
+                        master_tokenizer=self.master_tokenizer,
+                        model_tokenizer=self.auxiliary_tokenizer,
+                        master_mask_token_id=self.master_tokenizer.mask_token_id,
+                        model_mask_token_id=self.auxiliary_tokenizer.mask_token_id,
+                    )
                 )
-            )
 
-        max_length = max(view.input_ids.numel() for view in views)
-        pad_token_id = self.auxiliary_tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.auxiliary_tokenizer.eos_token_id
-        input_ids = torch.full(
-            (len(views), max_length),
-            int(pad_token_id),
-            dtype=torch.long,
-            device=self.auxiliary_device,
-        )
-        attention_mask = torch.zeros_like(input_ids)
-        for sample_index, view in enumerate(views):
-            length = view.input_ids.numel()
-            input_ids[sample_index, :length] = view.input_ids.to(self.auxiliary_device)
-            attention_mask[sample_index, :length] = 1
+        with timer("ctca.auxiliary_batch.pad_and_copy"):
+            max_length = max(view.input_ids.numel() for view in views)
+            pad_token_id = self.auxiliary_tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = self.auxiliary_tokenizer.eos_token_id
+            input_ids = torch.full(
+                (len(views), max_length),
+                int(pad_token_id),
+                dtype=torch.long,
+                device=self.auxiliary_device,
+            )
+            attention_mask = torch.zeros_like(input_ids)
+            for sample_index, view in enumerate(views):
+                length = view.input_ids.numel()
+                input_ids[sample_index, :length] = view.input_ids.to(self.auxiliary_device)
+                attention_mask[sample_index, :length] = 1
         return input_ids, attention_mask, views
 
     @torch.no_grad()
+    @timer()
     def _forward_aligned_probabilities(
         self,
         canvas: torch.Tensor,
@@ -163,49 +187,74 @@ class CTCATSESampler:
         auxiliary_prompts: Sequence[torch.Tensor],
         max_new_tokens: int,
         *,
+        block_index: int | None = None,
+        block_size: int | None = None,
         temperature_master: float,
         temperature_auxiliary: float,
         fusion_device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        master_logits = self.master_model(
-            canvas.to(self.master_device),
-            attention_mask=attention_mask.to(self.master_device),
-        ).logits
-        auxiliary_ids, auxiliary_mask, views = self._build_auxiliary_batch(
-            canvas, prompt_lens, auxiliary_prompts, max_new_tokens
-        )
-        auxiliary_logits = self.auxiliary_model(
-            auxiliary_ids,
-            attention_mask=auxiliary_mask,
-        ).logits
+        with timer("ctca.forward.master"):
+            master_logits = self.master_model(
+                canvas.to(self.master_device),
+                attention_mask=attention_mask.to(self.master_device),
+            ).logits
+        with timer("ctca.forward.build_auxiliary_batch"):
+            auxiliary_ids, auxiliary_mask, views = self._build_auxiliary_batch(
+                canvas, prompt_lens, auxiliary_prompts, max_new_tokens
+            )
+        with timer("ctca.forward.auxiliary"):
+            auxiliary_logits = self.auxiliary_model(
+                auxiliary_ids,
+                attention_mask=auxiliary_mask,
+            ).logits
 
-        active_mask = self._generation_mask(canvas, prompt_lens, max_new_tokens)
-        master_probabilities = logits_to_probabilities(
-            master_logits[active_mask.to(self.master_device)].to(fusion_device),
-            temperature_master,
-        )
+        with timer("ctca.forward.master_probabilities"):
+            active_mask = self._generation_mask(
+                canvas,
+                prompt_lens,
+                max_new_tokens,
+                block_index=block_index,
+                block_size=block_size,
+            )
+            master_probabilities = logits_to_probabilities(
+                master_logits[active_mask.to(self.master_device)].to(fusion_device),
+                temperature_master,
+            )
+        if block_index is None:
+            projection_start = 0
+            projection_end = max_new_tokens
+        else:
+            if block_size is None:
+                raise ValueError("block_size is required when block_index is set")
+            projection_start = block_index * block_size
+            projection_end = min(projection_start + block_size, max_new_tokens)
         master_offsets = tuple(
-            (float(index), float(index + 1)) for index in range(max_new_tokens)
+            (float(index), float(index + 1))
+            for index in range(projection_start, projection_end)
         )
-        projected_by_sample = []
-        for sample_index, (prompt_len, view) in enumerate(zip(prompt_lens, views)):
-            local_active = active_mask[
-                sample_index, prompt_len : prompt_len + max_new_tokens
-            ]
-            generated_logits = auxiliary_logits[sample_index, view.generation_slice]
-            auxiliary_probabilities = logits_to_probabilities(
-                generated_logits.to(fusion_device), temperature_auxiliary
-            )
-            projected = self.aligner.project_model_probabilities(
-                self._aligner_auxiliary_id,
-                auxiliary_probabilities,
-                view.offsets,
-                master_offsets,
-            )
-            projected_by_sample.append(projected[local_active.to(fusion_device)])
+        with timer("ctca.forward.project_auxiliary"):
+            projected_by_sample = []
+            for sample_index, (prompt_len, view) in enumerate(zip(prompt_lens, views)):
+                local_active = active_mask[
+                    sample_index,
+                    prompt_len + projection_start : prompt_len + projection_end,
+                ]
+                generated_logits = auxiliary_logits[sample_index, view.generation_slice]
+                auxiliary_probabilities = logits_to_probabilities(
+                    generated_logits.to(fusion_device), temperature_auxiliary
+                )
+                overlap_matrix = view.overlap_matrix if block_index is None else None
+                projected = self.aligner.project_model_probabilities(
+                    self._aligner_auxiliary_id,
+                    auxiliary_probabilities,
+                    view.offsets,
+                    master_offsets,
+                    overlap_matrix=overlap_matrix,
+                )
+                projected_by_sample.append(projected[local_active.to(fusion_device)])
 
-        projected_auxiliary = torch.cat(projected_by_sample, dim=0)
-        active_positions = active_mask.nonzero(as_tuple=False)
+            projected_auxiliary = torch.cat(projected_by_sample, dim=0)
+            active_positions = active_mask.nonzero(as_tuple=False)
         if master_probabilities.shape != projected_auxiliary.shape:
             raise ValueError(
                 "CTCA projection did not align active probability shapes: "
@@ -255,41 +304,45 @@ class CTCATSESampler:
                 "or 'per_token_margin'"
             )
 
-        prompts = [
-            torch.as_tensor(prompt, dtype=torch.long, device=self.master_device).flatten()
-            for prompt in inputs
-        ]
-        prompt_lens = [prompt.numel() for prompt in prompts]
-        if auxiliary_inputs is None:
-            auxiliary_prompts = [
-                self._derive_auxiliary_prompt(prompt.cpu()) for prompt in prompts
+        with timer("ctca.sample.prepare_prompts"):
+            prompts = [
+                torch.as_tensor(
+                    prompt, dtype=torch.long, device=self.master_device
+                ).flatten()
+                for prompt in inputs
             ]
-        else:
-            if len(auxiliary_inputs) != len(prompts):
-                raise ValueError("auxiliary_inputs must align with inputs")
-            auxiliary_prompts = [
-                torch.as_tensor(prompt, dtype=torch.long).flatten()
-                for prompt in auxiliary_inputs
-            ]
+            prompt_lens = [prompt.numel() for prompt in prompts]
+            if auxiliary_inputs is None:
+                auxiliary_prompts = [
+                    self._derive_auxiliary_prompt(prompt.cpu()) for prompt in prompts
+                ]
+            else:
+                if len(auxiliary_inputs) != len(prompts):
+                    raise ValueError("auxiliary_inputs must align with inputs")
+                auxiliary_prompts = [
+                    torch.as_tensor(prompt, dtype=torch.long).flatten()
+                    for prompt in auxiliary_inputs
+                ]
 
-        maximum_length = max(prompt_lens) + max_new_tokens
-        master_pad_id = self.master_tokenizer.pad_token_id
-        if master_pad_id is None:
-            master_pad_id = self.master_tokenizer.eos_token_id
-        canvas = torch.full(
-            (len(prompts), maximum_length),
-            int(master_pad_id),
-            dtype=torch.long,
-            device=self.master_device,
-        )
-        attention_mask = torch.zeros_like(canvas)
-        for sample_index, prompt in enumerate(prompts):
-            prompt_len = prompt.numel()
-            canvas[sample_index, :prompt_len] = prompt
-            canvas[
-                sample_index, prompt_len : prompt_len + max_new_tokens
-            ] = self.master_tokenizer.mask_token_id
-            attention_mask[sample_index, : prompt_len + max_new_tokens] = 1
+        with timer("ctca.sample.initialize_canvas"):
+            maximum_length = max(prompt_lens) + max_new_tokens
+            master_pad_id = self.master_tokenizer.pad_token_id
+            if master_pad_id is None:
+                master_pad_id = self.master_tokenizer.eos_token_id
+            canvas = torch.full(
+                (len(prompts), maximum_length),
+                int(master_pad_id),
+                dtype=torch.long,
+                device=self.master_device,
+            )
+            attention_mask = torch.zeros_like(canvas)
+            for sample_index, prompt in enumerate(prompts):
+                prompt_len = prompt.numel()
+                canvas[sample_index, :prompt_len] = prompt
+                canvas[
+                    sample_index, prompt_len : prompt_len + max_new_tokens
+                ] = self.master_tokenizer.mask_token_id
+                attention_mask[sample_index, : prompt_len + max_new_tokens] = 1
 
         target_device = torch.device(fusion_device or self.master_device)
         temperature_master = temperature_a if self.master_id == "a" else temperature_b
@@ -300,27 +353,29 @@ class CTCATSESampler:
         steps_per_block = math.ceil(steps / num_blocks)
 
         for block_index in range(num_blocks):
-            block_mask = torch.zeros(
-                (len(prompts), block_size),
-                dtype=torch.bool,
-                device=self.master_device,
-            )
-            for sample_index, prompt_len in enumerate(prompt_lens):
-                start = prompt_len + block_index * block_size
-                end = min(start + block_size, prompt_len + max_new_tokens)
-                if start < end:
-                    block_mask[sample_index, : end - start] = (
-                        canvas[sample_index, start:end]
-                        == self.master_tokenizer.mask_token_id
-                    )
-            transfer_counts = get_num_transfer_tokens(
-                block_mask,
-                steps_per_block,
-                self.scheduler,
-                stochastic=stochastic_transfer,
-            )
+            with timer("ctca.sample.transfer_schedule"):
+                block_mask = torch.zeros(
+                    (len(prompts), block_size),
+                    dtype=torch.bool,
+                    device=self.master_device,
+                )
+                for sample_index, prompt_len in enumerate(prompt_lens):
+                    start = prompt_len + block_index * block_size
+                    end = min(start + block_size, prompt_len + max_new_tokens)
+                    if start < end:
+                        block_mask[sample_index, : end - start] = (
+                            canvas[sample_index, start:end]
+                            == self.master_tokenizer.mask_token_id
+                        )
+                transfer_counts = get_num_transfer_tokens(
+                    block_mask,
+                    steps_per_block,
+                    self.scheduler,
+                    stochastic=stochastic_transfer,
+                )
 
             for step_index in range(transfer_counts.shape[1]):
+                project_current_block_only = weighting_mode != "online_entropy"
                 master_probabilities, auxiliary_probabilities, active_positions = (
                     self._forward_aligned_probabilities(
                         canvas,
@@ -328,6 +383,10 @@ class CTCATSESampler:
                         prompt_lens,
                         auxiliary_prompts,
                         max_new_tokens,
+                        block_index=(
+                            block_index if project_current_block_only else None
+                        ),
+                        block_size=block_size if project_current_block_only else None,
                         temperature_master=temperature_master,
                         temperature_auxiliary=temperature_auxiliary,
                         fusion_device=target_device,
@@ -342,87 +401,89 @@ class CTCATSESampler:
                         )
                     )
 
-                if selection_mode == "tse":
-                    if weighting_mode == "static":
-                        weighting = static_weights(
-                            master_static_weight,
-                            master_probabilities.shape[0],
-                            target_device,
-                        )
-                    elif weighting_mode == "online_entropy":
-                        weighting = online_entropy_weights(
+                with timer("ctca.sample.score_candidates"):
+                    if selection_mode == "tse":
+                        if weighting_mode == "static":
+                            weighting = static_weights(
+                                master_static_weight,
+                                master_probabilities.shape[0],
+                                target_device,
+                            )
+                        elif weighting_mode == "online_entropy":
+                            weighting = online_entropy_weights(
+                                master_probabilities,
+                                auxiliary_probabilities,
+                                weight_temperature,
+                                epsilon,
+                                normalize_entropy,
+                            )
+                        else:
+                            weighting = per_token_margin_weights(
+                                master_probabilities,
+                                auxiliary_probabilities,
+                                weight_temperature,
+                            )
+                        fused = fuse_probabilities(
                             master_probabilities,
                             auxiliary_probabilities,
-                            weight_temperature,
+                            weighting.weights_a,
+                        )
+                        divergence = jensen_shannon_divergence(
+                            master_probabilities,
+                            auxiliary_probabilities,
+                            weighting.weights_a,
                             epsilon,
-                            normalize_entropy,
                         )
-                    else:
-                        weighting = per_token_margin_weights(
-                            master_probabilities,
-                            auxiliary_probabilities,
-                            weight_temperature,
+                        agreement = agreement_factor(
+                            divergence, weighting.weights_a, epsilon
                         )
-                    fused = fuse_probabilities(
-                        master_probabilities,
-                        auxiliary_probabilities,
-                        weighting.weights_a,
-                    )
-                    divergence = jensen_shannon_divergence(
-                        master_probabilities,
-                        auxiliary_probabilities,
-                        weighting.weights_a,
-                        epsilon,
-                    )
-                    agreement = agreement_factor(
-                        divergence, weighting.weights_a, epsilon
-                    )
-                    confidence, predicted_tokens = fused_confidence(fused)
-                    scores = consensus_scores(confidence, agreement)
-                else:
-                    selected_probabilities = (
-                        master_probabilities
-                        if baseline_model == self.master_id
-                        else auxiliary_probabilities
-                    )
-                    if temperature == 0:
-                        predicted_tokens = selected_probabilities.argmax(dim=-1)
+                        confidence, predicted_tokens = fused_confidence(fused)
+                        scores = consensus_scores(confidence, agreement)
                     else:
-                        predicted_tokens = add_gumbel_noise(
-                            selected_probabilities.clamp_min(epsilon).log(),
-                            temperature,
-                        ).argmax(dim=-1)
-                    scores = selected_probabilities.gather(
-                        -1, predicted_tokens.unsqueeze(-1)
-                    ).squeeze(-1)
-                    if remasking == "random":
-                        scores = torch.rand_like(scores)
+                        selected_probabilities = (
+                            master_probabilities
+                            if baseline_model == self.master_id
+                            else auxiliary_probabilities
+                        )
+                        if temperature == 0:
+                            predicted_tokens = selected_probabilities.argmax(dim=-1)
+                        else:
+                            predicted_tokens = add_gumbel_noise(
+                                selected_probabilities.clamp_min(epsilon).log(),
+                                temperature,
+                            ).argmax(dim=-1)
+                        scores = selected_probabilities.gather(
+                            -1, predicted_tokens.unsqueeze(-1)
+                        ).squeeze(-1)
+                        if remasking == "random":
+                            scores = torch.rand_like(scores)
 
-                score_canvas = torch.full_like(
-                    canvas, -torch.inf, dtype=torch.float32
-                )
-                token_canvas = canvas.clone()
-                token_canvas[active_positions[:, 0], active_positions[:, 1]] = (
-                    predicted_tokens.to(self.master_device)
-                )
-                score_canvas[active_positions[:, 0], active_positions[:, 1]] = scores.to(
-                    self.master_device
-                )
-                for sample_index, prompt_len in enumerate(prompt_lens):
+                with timer("ctca.sample.select_and_commit"):
+                    score_canvas = torch.full_like(
+                        canvas, -torch.inf, dtype=torch.float32
+                    )
+                    token_canvas = canvas.clone()
+                    token_canvas[active_positions[:, 0], active_positions[:, 1]] = (
+                        predicted_tokens.to(self.master_device)
+                    )
                     score_canvas[
-                        sample_index,
-                        prompt_len + (block_index + 1) * block_size :,
-                    ] = -torch.inf
+                        active_positions[:, 0], active_positions[:, 1]
+                    ] = scores.to(self.master_device)
+                    for sample_index, prompt_len in enumerate(prompt_lens):
+                        score_canvas[
+                            sample_index,
+                            prompt_len + (block_index + 1) * block_size :,
+                        ] = -torch.inf
 
-                mask_index = self._generation_mask(
-                    canvas, prompt_lens, max_new_tokens
-                )
-                selected_positions, selected_tokens = select_positions(
-                    score_canvas[mask_index],
-                    token_canvas[mask_index],
-                    mask_index.nonzero(as_tuple=False),
-                    transfer_counts[:, step_index],
-                )
-                canvas = commit_tokens(canvas, selected_positions, selected_tokens)
+                    mask_index = torch.zeros_like(canvas, dtype=torch.bool)
+                    if active_positions.numel():
+                        mask_index[active_positions[:, 0], active_positions[:, 1]] = True
+                    selected_positions, selected_tokens = select_positions(
+                        score_canvas[mask_index],
+                        token_canvas[mask_index],
+                        mask_index.nonzero(as_tuple=False),
+                        transfer_counts[:, step_index],
+                    )
+                    canvas = commit_tokens(canvas, selected_positions, selected_tokens)
 
         return canvas

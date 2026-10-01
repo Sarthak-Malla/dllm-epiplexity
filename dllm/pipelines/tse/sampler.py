@@ -16,6 +16,7 @@ from dllm.pipelines.tse.weighting import (
     per_token_margin_weights,
     static_weights,
 )
+from dllm.pipelines.tse.utils import timer
 
 
 class TSESampler:
@@ -42,6 +43,7 @@ class TSESampler:
         self.last_paired_logits = []
 
     @torch.no_grad()
+    @timer()
     def forward_pair(
         self,
         canvas: torch.Tensor,
@@ -65,6 +67,7 @@ class TSESampler:
         return logits_a, logits_b
 
     @torch.no_grad()
+    @timer()
     def sample(
         self,
         inputs: list[torch.Tensor | list],

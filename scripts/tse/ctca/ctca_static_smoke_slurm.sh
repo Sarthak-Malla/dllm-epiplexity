@@ -2,9 +2,9 @@
 #SBATCH --job-name=ctca-static-smoke
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=00:30:00
+#SBATCH --time=00:10:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54
+#SBATCH --exclude=gpu-05,gpu-54,gpu-51
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -47,6 +47,8 @@ source "${CONFIG_PATH}"
 : "${ctca_force_rebuild:?ctca_force_rebuild is required}"
 : "${ctca_projection_temperature:?ctca_projection_temperature is required}"
 : "${ctca_chunk_size:?ctca_chunk_size is required}"
+: "${ctca_projection_mode:?ctca_projection_mode is required}"
+: "${ctca_projection_top_k:?ctca_projection_top_k is required}"
 : "${ctca_num_anchors:?ctca_num_anchors is required}"
 : "${ctca_min_anchors:?ctca_min_anchors is required}"
 : "${question:?question is required}"
@@ -62,6 +64,7 @@ export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export TSE_TIMERS=1
 
 REBUILD_ARGS=()
 if [[ "${ctca_force_rebuild}" == "true" ]]; then
@@ -92,6 +95,8 @@ python scripts/tse/smoke.py \
     --ctca-cache-dir "${ctca_cache_dir}" \
     --ctca-projection-temperature "${ctca_projection_temperature}" \
     --ctca-chunk-size "${ctca_chunk_size}" \
+    --ctca-projection-mode "${ctca_projection_mode}" \
+    --ctca-projection-top-k "${ctca_projection_top_k}" \
     --ctca-num-anchors "${ctca_num_anchors}" \
     --ctca-min-anchors "${ctca_min_anchors}" \
     --question "${question}" \

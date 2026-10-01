@@ -11,9 +11,14 @@ from dllm.pipelines.tse.ctca.cache import CTCACacheManager
 from dllm.pipelines.tse.ctca.canvas import (
     build_canvas_overlap_matrix,
     build_model_canvas_view,
+    encode_with_offsets,
     spatial_warp_probabilities,
 )
-from dllm.pipelines.tse.ctca.projection import project_vocab_fused
+from dllm.pipelines.tse.ctca.projection import (
+    build_sparse_topk_vocab_projection,
+    project_vocab_fused,
+    project_vocab_sparse_topk,
+)
 
 
 class ToyTokenizer:
@@ -66,6 +71,13 @@ class ToyTokenizer:
         return result
 
 
+class SlowToyTokenizer(ToyTokenizer):
+    def __call__(self, text, *, return_offsets_mapping=False, **kwargs):
+        if return_offsets_mapping:
+            raise NotImplementedError("slow tokenizer")
+        return super().__call__(text, return_offsets_mapping=False, **kwargs)
+
+
 @pytest.mark.parametrize(
     ("auxiliary", "master", "expected"),
     [
@@ -115,6 +127,19 @@ def test_model_canvas_uses_native_mask_and_allows_different_length():
     assert view.generation_length == 4
     assert view.overlap_matrix.shape == (4, 3)
     assert view.overlap_matrix.to_dense()[-1].tolist() == [0.0, 0.0, 1.0]
+
+
+def test_slow_tokenizer_offsets_are_derived_from_decoded_prefixes():
+    tokenizer = SlowToyTokenizer(
+        ["ab", "c", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+
+    token_ids, offsets = encode_with_offsets(tokenizer, "abc")
+
+    assert token_ids == [0, 1]
+    assert offsets == [(0.0, 2.0), (2.0, 3.0)]
 
 
 def test_procrustes_recovers_synthetic_rotation():
@@ -186,6 +211,40 @@ def test_chunked_projection_matches_dense_and_normalizes_rows():
     assert torch.allclose(actual, expected, atol=1e-6)
     assert torch.allclose(actual.sum(dim=-1), torch.ones(2))
     assert actual.shape == (2, 4)
+
+
+def test_sparse_topk_projection_matches_dense_when_topk_covers_vocab():
+    spatial = torch.tensor([[0.6, 0.4], [0.2, 0.8]], dtype=torch.float32)
+    auxiliary = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    master = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]],
+        dtype=torch.float32,
+    )
+
+    dense = project_vocab_fused(
+        spatial,
+        auxiliary,
+        master,
+        temperature=0.5,
+        chunk_size=1,
+    )
+    top_indices, top_weights = build_sparse_topk_vocab_projection(
+        F.normalize(auxiliary, dim=-1),
+        F.normalize(master, dim=-1),
+        top_k=master.shape[0],
+        temperature=0.5,
+        chunk_size=1,
+    )
+    sparse = project_vocab_sparse_topk(
+        spatial,
+        top_indices,
+        top_weights,
+        master_vocab_size=master.shape[0],
+        chunk_size=1,
+    )
+
+    assert torch.allclose(sparse, dense, atol=1e-6)
+    assert torch.allclose(sparse.sum(dim=-1), torch.ones(2), atol=1e-6)
 
 
 def test_cache_reuses_pair_signature_and_rejects_malformed_metadata(tmp_path):
