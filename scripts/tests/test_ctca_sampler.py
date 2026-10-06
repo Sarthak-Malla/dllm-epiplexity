@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
+from dllm.pipelines.tse import ctca_sampler as ctca_sampler_module
 from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
 from dllm.pipelines.tse.sampler import TSESampler
 
@@ -190,6 +191,120 @@ def test_ctca_sampler_runs_sparse_topk_projection_backend():
         2,
         len(master_tokenizer.get_vocab()),
     )
+
+
+def test_ctca_sampler_batches_canvas_and_projection_across_samples():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master_tokenizer.get_vocab())),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab())),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        projection_mode="sparse_topk",
+        projection_top_k=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+
+    generated = sampler.sample(
+        [torch.tensor([0]), torch.tensor([1])],
+        auxiliary_inputs=[torch.tensor([0]), torch.tensor([1])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+        weighting_mode="static",
+        capture_logits=True,
+    )
+
+    active_positions, master_probabilities, auxiliary_probabilities = (
+        sampler.last_aligned_probabilities[0]
+    )
+    assert generated.shape == (2, 3)
+    assert not torch.any(generated[:, 1:] == master_tokenizer.mask_token_id)
+    assert active_positions.tolist() == [[0, 1], [0, 2], [1, 1], [1, 2]]
+    assert master_probabilities.shape == (4, len(master_tokenizer.get_vocab()))
+    assert auxiliary_probabilities.shape == master_probabilities.shape
+
+
+def test_ctca_sampler_run_cache_matches_uncached_canvas_path(monkeypatch):
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+
+    def make_sampler():
+        return CTCATSESampler(
+            FixedMaskedModel(len(master_tokenizer.get_vocab())),
+            FixedMaskedModel(len(auxiliary_tokenizer.get_vocab())),
+            master_tokenizer,
+            auxiliary_tokenizer,
+            "cpu",
+            "cpu",
+            master_id="a",
+            auxiliary_id="b",
+            cache_dir=None,
+            projection_temperature=0.5,
+            projection_chunk_size=2,
+            num_anchors=3,
+            min_anchors=3,
+        )
+
+    cached_sampler = make_sampler()
+    cached = cached_sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=4,
+        steps=4,
+        block_size=2,
+        selection_mode="tse",
+        weighting_mode="static",
+        capture_logits=True,
+    )
+
+    original_build_model_canvas_view = ctca_sampler_module.build_model_canvas_view
+
+    def build_uncached_model_canvas_view(*args, **kwargs):
+        kwargs["run_cache"] = None
+        return original_build_model_canvas_view(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ctca_sampler_module,
+        "build_model_canvas_view",
+        build_uncached_model_canvas_view,
+    )
+    uncached_sampler = make_sampler()
+    uncached = uncached_sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=4,
+        steps=4,
+        block_size=2,
+        selection_mode="tse",
+        weighting_mode="static",
+        capture_logits=True,
+    )
+
+    assert torch.equal(cached, uncached)
+    assert len(cached_sampler.last_aligned_probabilities) == len(
+        uncached_sampler.last_aligned_probabilities
+    )
+    for cached_step, uncached_step in zip(
+        cached_sampler.last_aligned_probabilities,
+        uncached_sampler.last_aligned_probabilities,
+    ):
+        for cached_tensor, uncached_tensor in zip(cached_step, uncached_step):
+            assert cached_tensor.shape == uncached_tensor.shape
 
 
 def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():

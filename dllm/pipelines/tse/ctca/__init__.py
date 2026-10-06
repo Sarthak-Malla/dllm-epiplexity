@@ -8,6 +8,8 @@ from .aligner import CrossTokenizerAligner
 from .alignment import AlignmentResult, align_embeddings_procrustes
 from .cache import CTCACacheManager
 from .canvas import (
+    CanvasRunCache,
+    CachedCanvasRun,
     ModelCanvasView,
     build_canvas_overlap_matrix,
     build_model_canvas_view,
@@ -22,6 +24,8 @@ from .projection import (
 
 __all__ = [
     "AlignmentResult",
+    "CachedCanvasRun",
+    "CanvasRunCache",
     "CTCACacheManager",
     "CrossTokenizerAligner",
     "ModelCanvasView",

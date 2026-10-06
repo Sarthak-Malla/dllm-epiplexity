@@ -6,11 +6,13 @@ Run from the repository root with:
         --model-a GSAI-ML/LLaDA-8B-Base \
         --model-b GSAI-ML/LLaDA-8B-Instruct
 
-Add ``--ctca --master-model a`` when the models use different tokenizers.
+For CTCA, model A is LLaDA and model B is Dream. Add ``--ctca`` to print a
+decoded trace of every canvas, model prediction, alignment, and fusion step.
 """
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -35,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=16)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--trace-top-k",
+        type=int,
+        default=5,
+        help="Number of decoded candidates to print per CTCA model prediction.",
+    )
     parser.add_argument(
         "--baseline-model",
         choices=("a", "b"),
@@ -122,6 +130,194 @@ def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
             print("    model A:", list(zip(tokens_a, scores_a)))
             print("    model B:", list(zip(tokens_b, scores_b)))
             print("    top-1 agreement:", int(ids_a[0]) == int(ids_b[0]))
+
+
+def _decode_token(tokenizer, token_id: int) -> str:
+    if token_id == tokenizer.mask_token_id:
+        return "[Mask]"
+    return tokenizer.decode(
+        [token_id],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+
+
+def _decode_ids(tokenizer, token_ids) -> str:
+    return " ".join(
+        _decode_token(tokenizer, int(token_id)) for token_id in token_ids
+    )
+
+
+def make_ctca_trace_logger(
+    master_id: str,
+    auxiliary_id: str,
+    master_tokenizer,
+    auxiliary_tokenizer,
+    top_k: int,
+):
+    from dllm.pipelines.tse.ctca.canvas import build_model_canvas_view
+
+    labels = {
+        "a": "model A (LLaDA)",
+        "b": "model B (Dream)",
+    }
+
+    def top_predictions(tokenizer, logits: torch.Tensor) -> str:
+        values, token_ids = torch.topk(logits.float(), k=min(top_k, logits.shape[-1]))
+        return ", ".join(
+            f"{_decode_token(tokenizer, int(token_id))!r}:{float(value):.3f}"
+            for value, token_id in zip(values, token_ids)
+        )
+
+    def top_probabilities(tokenizer, probabilities: torch.Tensor) -> str:
+        values, token_ids = torch.topk(
+            probabilities.float(), k=min(top_k, probabilities.shape[-1])
+        )
+        return ", ".join(
+            f"{_decode_token(tokenizer, int(token_id))!r}:{float(value):.6f}"
+            for value, token_id in zip(values, token_ids)
+        )
+
+    def log(event: str, payload: dict) -> None:
+        if event == "canvas":
+            phase = payload["phase"]
+            step = payload.get("step")
+            prefix = f"\n[CTCA {phase} canvas"
+            if step is not None:
+                prefix += f" step={step[0]}.{step[1]}"
+            print(prefix + "]")
+            canvas = payload["canvas"]
+            for sample_index, prompt_len in enumerate(payload["prompt_lens"]):
+                print(
+                    f"  {labels[master_id]}: "
+                    f"{_decode_ids(master_tokenizer, canvas[sample_index].tolist())}"
+                )
+                auxiliary_prompt = payload["auxiliary_prompts"][sample_index]
+                generated = canvas[sample_index, prompt_len:].tolist()
+                auxiliary_view = build_model_canvas_view(
+                    auxiliary_prompt,
+                    generated,
+                    master_tokenizer=master_tokenizer,
+                    model_tokenizer=auxiliary_tokenizer,
+                    master_mask_token_id=master_tokenizer.mask_token_id,
+                    model_mask_token_id=auxiliary_tokenizer.mask_token_id,
+                )
+                print(
+                    f"  {labels[auxiliary_id]}: "
+                    f"{_decode_ids(auxiliary_tokenizer, auxiliary_view.input_ids.tolist())}"
+                )
+            return
+
+        if event == "forward":
+            step = payload["step"]
+            print(f"\n[CTCA step {step[0]}.{step[1]} model predictions]")
+            canvas = payload["canvas"]
+            active_positions = payload["active_positions"]
+            active_mask = payload["active_mask"]
+            master_logits = payload["master_logits"]
+            auxiliary_logits = payload["auxiliary_logits"]
+            views = payload["views"]
+            for sample_index, prompt_len in enumerate(payload["prompt_lens"]):
+                print(
+                    f"  {labels[master_id]} state: "
+                    f"{_decode_ids(master_tokenizer, canvas[sample_index].tolist())}"
+                )
+                master_active = active_mask[sample_index]
+                master_positions = torch.where(master_active)[0]
+                master_values = master_logits[sample_index, master_active]
+                for position, logits in zip(master_positions, master_values):
+                    generation_position = int(position) - int(prompt_len)
+                    print(
+                        f"    abs pos {int(position)} gen pos {generation_position} -> "
+                        f"{top_predictions(master_tokenizer, logits)}"
+                    )
+
+                view = views[sample_index]
+                print(
+                    f"  {labels[auxiliary_id]} state: "
+                    f"{_decode_ids(auxiliary_tokenizer, view.input_ids.tolist())}"
+                )
+                auxiliary_generation = auxiliary_logits[
+                    sample_index, view.generation_slice
+                ]
+                auxiliary_mask = view.input_ids[view.generation_slice] == (
+                    auxiliary_tokenizer.mask_token_id
+                )
+                for position, logits in zip(
+                    torch.where(auxiliary_mask)[0], auxiliary_generation[auxiliary_mask]
+                ):
+                    absolute_position = int(view.generation_slice.start) + int(position)
+                    print(
+                        f"    abs pos {absolute_position} gen pos {int(position)} -> "
+                        f"{top_predictions(auxiliary_tokenizer, logits)}"
+                    )
+
+                overlap = view.overlap_matrix.to_dense().cpu()
+                print("  alignment (auxiliary generation slot -> master generation slot):")
+                for auxiliary_position, row in enumerate(overlap):
+                    master_indices = torch.where(row > 0)[0]
+                    if not len(master_indices):
+                        continue
+                    auxiliary_token = _decode_token(
+                        auxiliary_tokenizer,
+                        int(view.input_ids[view.generation_slice][auxiliary_position]),
+                    )
+                    mapped = ", ".join(
+                        f"gen {int(master_position)} abs {int(prompt_len + master_position)} "
+                        f"{_decode_token(master_tokenizer, int(canvas[sample_index, prompt_len + master_position]))!r}"
+                        f" overlap={float(row[master_position]):.2f}"
+                        for master_position in master_indices
+                    )
+                    auxiliary_absolute = int(view.generation_slice.start) + auxiliary_position
+                    print(
+                        f"    gen {auxiliary_position} abs {auxiliary_absolute} "
+                        f"{auxiliary_token!r} -> {mapped}"
+                    )
+            return
+
+        if event == "fusion":
+            step = payload["step"]
+            print(f"\n[CTCA step {step[0]}.{step[1]} probability fusion]")
+            for index, (position, token_id, score) in enumerate(
+                zip(
+                    payload["active_positions"].tolist(),
+                    payload["predicted_tokens"].tolist(),
+                    payload["scores"].tolist(),
+                )
+            ):
+                weight = payload["weights_a"]
+                weight_text = "baseline"
+                if weight is not None:
+                    weight_text = f"model A weight={float(weight[index]):.3f}"
+                master_probability = payload["master_probabilities"][
+                    index, int(token_id)
+                ]
+                auxiliary_probability = payload["auxiliary_probabilities"][
+                    index, int(token_id)
+                ]
+                fused_probabilities = payload.get("fused_probabilities")
+                fused_text = "fused=baseline"
+                if fused_probabilities is not None:
+                    fused_probability = fused_probabilities[index, int(token_id)]
+                    fused_text = f"fused={float(fused_probability):.6f}"
+                print(
+                    f"  batch={position[0]} pos={position[1]} -> "
+                    f"{_decode_token(master_tokenizer, int(token_id))!r}, "
+                    f"master={float(master_probability):.6f}, "
+                    f"projected_aux={float(auxiliary_probability):.6f}, "
+                    f"{fused_text}, score={float(score):.6f}, {weight_text}"
+                )
+                print(
+                    f"    {labels[auxiliary_id]} projected to {labels[master_id]} top-k: "
+                    f"{top_probabilities(master_tokenizer, payload['auxiliary_probabilities'][index])}"
+                )
+                if fused_probabilities is not None:
+                    print(
+                        "    fused top-k: "
+                        f"{top_probabilities(master_tokenizer, fused_probabilities[index])}"
+                    )
+
+    return log
 
 
 def main() -> None:
@@ -231,11 +427,19 @@ def main() -> None:
             args.model_a_device,
             args.model_b_device,
         )
-    sampler_inputs = (
+    sampler_inputs: dict[str, Any] = (
         {"auxiliary_inputs": [auxiliary_prompt_ids]}
         if auxiliary_prompt_ids is not None
         else {}
     )
+    if args.ctca:
+        sampler_inputs["trace_callback"] = make_ctca_trace_logger(
+            args.master_model,
+            auxiliary_name,
+            tokenizer,
+            auxiliary_tokenizer,
+            args.trace_top_k,
+        )
     generated = sampler.sample(
         [prompt_ids],
         **sampler_inputs,
@@ -259,12 +463,13 @@ def main() -> None:
     print("Selection mode:", args.selection_mode)
     print("Weighting mode:", args.weighting_mode)
     if args.ctca:
-        aligned = sampler.last_aligned_probabilities
+        aligned = getattr(sampler, "last_aligned_probabilities")
         print("Captured aligned steps:", len(aligned))
     else:
-        print("Captured forward steps:", len(sampler.last_paired_logits))
-        if sampler.last_paired_logits:
-            print_top_predictions(tokenizer, sampler.last_paired_logits, args.top_k)
+        paired_logits = getattr(sampler, "last_paired_logits")
+        print("Captured forward steps:", len(paired_logits))
+        if paired_logits:
+            print_top_predictions(tokenizer, paired_logits, args.top_k)
     print("\nDecoded canvas:")
     print(tokenizer.decode(generated[0].tolist(), skip_special_tokens=False))
 

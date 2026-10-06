@@ -5,13 +5,20 @@ Run the CPU integration tests with:
 """
 
 import math
+import os
+from concurrent.futures import Executor, ThreadPoolExecutor
 from collections.abc import Sequence
+from typing import Callable
 
 import torch
 
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 from dllm.core.schedulers import LinearAlphaScheduler
-from dllm.pipelines.tse.ctca import CrossTokenizerAligner, build_model_canvas_view
+from dllm.pipelines.tse.ctca import (
+    CanvasRunCache,
+    CrossTokenizerAligner,
+    build_model_canvas_view,
+)
 from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_divergence
 from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
@@ -135,29 +142,49 @@ class CTCATSESampler:
             )
         return mask
 
+    def _canvas_worker_count(self, batch_size: int) -> int:
+        configured = os.environ.get("CTCA_CANVAS_WORKERS")
+        if configured is not None:
+            worker_count = int(configured)
+        else:
+            worker_count = min(batch_size, os.cpu_count() or 1, 8)
+        return max(1, min(batch_size, worker_count))
+
     def _build_auxiliary_batch(
         self,
         canvas: torch.Tensor,
         prompt_lens: Sequence[int],
         auxiliary_prompts: Sequence[torch.Tensor],
         max_new_tokens: int,
+        auxiliary_run_caches: Sequence[CanvasRunCache] | None = None,
+        canvas_executor: Executor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, list]:
-        views = []
+        def build_view(sample_index: int):
+            prompt_len = prompt_lens[sample_index]
+            run_cache = (
+                auxiliary_run_caches[sample_index]
+                if auxiliary_run_caches is not None
+                else None
+            )
+            generated = canvas[
+                sample_index, prompt_len : prompt_len + max_new_tokens
+            ].detach().cpu()
+            return build_model_canvas_view(
+                auxiliary_prompts[sample_index],
+                generated,
+                master_tokenizer=self.master_tokenizer,
+                model_tokenizer=self.auxiliary_tokenizer,
+                master_mask_token_id=self.master_tokenizer.mask_token_id,
+                model_mask_token_id=self.auxiliary_tokenizer.mask_token_id,
+                run_cache=run_cache,
+            )
+
         with timer("ctca.auxiliary_batch.build_views"):
-            for sample_index, prompt_len in enumerate(prompt_lens):
-                generated = canvas[
-                    sample_index, prompt_len : prompt_len + max_new_tokens
-                ].detach().cpu()
-                views.append(
-                    build_model_canvas_view(
-                        auxiliary_prompts[sample_index],
-                        generated,
-                        master_tokenizer=self.master_tokenizer,
-                        model_tokenizer=self.auxiliary_tokenizer,
-                        master_mask_token_id=self.master_tokenizer.mask_token_id,
-                        model_mask_token_id=self.auxiliary_tokenizer.mask_token_id,
-                    )
-                )
+            sample_indices = range(len(prompt_lens))
+            if canvas_executor is None:
+                views = [build_view(sample_index) for sample_index in sample_indices]
+            else:
+                views = list(canvas_executor.map(build_view, sample_indices))
 
         with timer("ctca.auxiliary_batch.pad_and_copy"):
             max_length = max(view.input_ids.numel() for view in views)
@@ -187,11 +214,15 @@ class CTCATSESampler:
         auxiliary_prompts: Sequence[torch.Tensor],
         max_new_tokens: int,
         *,
+        auxiliary_run_caches: Sequence[CanvasRunCache] | None = None,
+        canvas_executor: Executor | None = None,
         block_index: int | None = None,
         block_size: int | None = None,
         temperature_master: float,
         temperature_auxiliary: float,
         fusion_device: torch.device,
+        trace_callback: Callable[[str, dict], None] | None = None,
+        trace_step: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         with timer("ctca.forward.master"):
             master_logits = self.master_model(
@@ -200,7 +231,12 @@ class CTCATSESampler:
             ).logits
         with timer("ctca.forward.build_auxiliary_batch"):
             auxiliary_ids, auxiliary_mask, views = self._build_auxiliary_batch(
-                canvas, prompt_lens, auxiliary_prompts, max_new_tokens
+                canvas,
+                prompt_lens,
+                auxiliary_prompts,
+                max_new_tokens,
+                auxiliary_run_caches=auxiliary_run_caches,
+                canvas_executor=canvas_executor,
             )
         with timer("ctca.forward.auxiliary"):
             auxiliary_logits = self.auxiliary_model(
@@ -233,7 +269,7 @@ class CTCATSESampler:
             for index in range(projection_start, projection_end)
         )
         with timer("ctca.forward.project_auxiliary"):
-            projected_by_sample = []
+            spatial_by_sample = []
             for sample_index, (prompt_len, view) in enumerate(zip(prompt_lens, views)):
                 local_active = active_mask[
                     sample_index,
@@ -244,17 +280,36 @@ class CTCATSESampler:
                     generated_logits.to(fusion_device), temperature_auxiliary
                 )
                 overlap_matrix = view.overlap_matrix if block_index is None else None
-                projected = self.aligner.project_model_probabilities(
+                spatial = self.aligner.spatial_warp_model_probabilities(
                     self._aligner_auxiliary_id,
                     auxiliary_probabilities,
                     view.offsets,
                     master_offsets,
                     overlap_matrix=overlap_matrix,
                 )
-                projected_by_sample.append(projected[local_active.to(fusion_device)])
+                spatial_by_sample.append(spatial[local_active.to(fusion_device)])
 
-            projected_auxiliary = torch.cat(projected_by_sample, dim=0)
+            spatial_auxiliary = torch.cat(spatial_by_sample, dim=0)
+            projected_auxiliary = self.aligner.project_spatial_probabilities(
+                self._aligner_auxiliary_id,
+                spatial_auxiliary,
+            )
             active_positions = active_mask.nonzero(as_tuple=False)
+        if trace_callback is not None:
+            trace_callback(
+                "forward",
+                {
+                    "step": trace_step,
+                    "canvas": canvas.detach().cpu(),
+                    "prompt_lens": tuple(prompt_lens),
+                    "active_positions": active_positions.detach().cpu(),
+                    "master_logits": master_logits.detach().cpu(),
+                    "auxiliary_logits": auxiliary_logits.detach().cpu(),
+                    "active_mask": active_mask.detach().cpu(),
+                    "views": views,
+                    "master_offsets": master_offsets,
+                },
+            )
         if master_probabilities.shape != projected_auxiliary.shape:
             raise ValueError(
                 "CTCA projection did not align active probability shapes: "
@@ -286,6 +341,7 @@ class CTCATSESampler:
         weighting_mode: str = "static",
         weight_temperature: float = 1.0,
         normalize_entropy: bool = True,
+        trace_callback: Callable[[str, dict], None] | None = None,
     ) -> torch.Tensor:
         """Generate on the master grid while projecting the auxiliary model."""
         if not inputs:
@@ -343,14 +399,33 @@ class CTCATSESampler:
                     sample_index, prompt_len : prompt_len + max_new_tokens
                 ] = self.master_tokenizer.mask_token_id
                 attention_mask[sample_index, : prompt_len + max_new_tokens] = 1
+        if trace_callback is not None:
+            trace_callback(
+                "canvas",
+                {
+                    "phase": "initial",
+                    "canvas": canvas.detach().cpu(),
+                    "prompt_lens": tuple(prompt_lens),
+                    "auxiliary_prompts": tuple(
+                        prompt.detach().cpu() for prompt in auxiliary_prompts
+                    ),
+                },
+            )
 
         target_device = torch.device(fusion_device or self.master_device)
         temperature_master = temperature_a if self.master_id == "a" else temperature_b
         temperature_auxiliary = temperature_b if self.auxiliary_id == "b" else temperature_a
         master_static_weight = alpha if self.master_id == "a" else 1 - alpha
         self.last_aligned_probabilities = []
+        auxiliary_run_caches: list[CanvasRunCache] = [{} for _ in prompts]
         num_blocks = math.ceil(max_new_tokens / block_size)
         steps_per_block = math.ceil(steps / num_blocks)
+        canvas_worker_count = self._canvas_worker_count(len(prompts))
+        canvas_executor = (
+            ThreadPoolExecutor(max_workers=canvas_worker_count)
+            if canvas_worker_count > 1
+            else None
+        )
 
         for block_index in range(num_blocks):
             with timer("ctca.sample.transfer_schedule"):
@@ -383,6 +458,8 @@ class CTCATSESampler:
                         prompt_lens,
                         auxiliary_prompts,
                         max_new_tokens,
+                        auxiliary_run_caches=auxiliary_run_caches,
+                        canvas_executor=canvas_executor,
                         block_index=(
                             block_index if project_current_block_only else None
                         ),
@@ -390,6 +467,8 @@ class CTCATSESampler:
                         temperature_master=temperature_master,
                         temperature_auxiliary=temperature_auxiliary,
                         fusion_device=target_device,
+                        trace_callback=trace_callback,
+                        trace_step=(block_index, step_index),
                     )
                 )
                 if capture_logits:
@@ -458,6 +537,31 @@ class CTCATSESampler:
                         if remasking == "random":
                             scores = torch.rand_like(scores)
 
+                if trace_callback is not None:
+                    trace_callback(
+                        "fusion",
+                        {
+                            "step": (block_index, step_index),
+                            "active_positions": active_positions.detach().cpu(),
+                            "predicted_tokens": predicted_tokens.detach().cpu(),
+                            "scores": scores.detach().cpu(),
+                            "master_probabilities": master_probabilities.detach().cpu(),
+                            "auxiliary_probabilities": (
+                                auxiliary_probabilities.detach().cpu()
+                            ),
+                            "fused_probabilities": (
+                                fused.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                            "weights_a": (
+                                weighting.weights_a.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                        },
+                    )
+
                 with timer("ctca.sample.select_and_commit"):
                     score_canvas = torch.full_like(
                         canvas, -torch.inf, dtype=torch.float32
@@ -485,5 +589,21 @@ class CTCATSESampler:
                         transfer_counts[:, step_index],
                     )
                     canvas = commit_tokens(canvas, selected_positions, selected_tokens)
+                if trace_callback is not None:
+                    trace_callback(
+                        "canvas",
+                        {
+                            "phase": "next",
+                            "step": (block_index, step_index),
+                            "canvas": canvas.detach().cpu(),
+                            "prompt_lens": tuple(prompt_lens),
+                            "auxiliary_prompts": tuple(
+                                prompt.detach().cpu() for prompt in auxiliary_prompts
+                            ),
+                        },
+                    )
+
+        if canvas_executor is not None:
+            canvas_executor.shutdown(wait=True)
 
         return canvas

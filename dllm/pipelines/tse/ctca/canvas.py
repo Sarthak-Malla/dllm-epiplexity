@@ -34,6 +34,19 @@ class ModelCanvasView:
         return slice(self.generation_start, self.generation_start + self.generation_length)
 
 
+@dataclass(frozen=True)
+class CachedCanvasRun:
+    """Retokenized representation of one committed master-token run."""
+
+    text: str
+    encoded_ids: tuple[int, ...]
+    character_offsets: tuple[Span, ...]
+    prefix_boundaries: tuple[int, ...]
+
+
+CanvasRunCache = dict[tuple[int, ...], CachedCanvasRun]
+
+
 def _validate_offsets(offsets: Sequence[Span], name: str) -> None:
     for index, span in enumerate(offsets):
         if len(span) != 2:
@@ -204,6 +217,7 @@ def build_model_canvas_view(
     model_tokenizer,
     master_mask_token_id: int,
     model_mask_token_id: int,
+    run_cache: CanvasRunCache | None = None,
 ) -> ModelCanvasView:
     """Derive a native model view.
 
@@ -236,27 +250,46 @@ def build_model_canvas_view(
             ):
                 index += 1
             run_ids = generated_ids[run_start:index]
-            with timer("ctca.canvas.decode_committed_run"):
-                run_text = _decode(master_tokenizer, run_ids)
-            with timer("ctca.canvas.retokenize_committed_run"):
-                encoded_ids, character_offsets = encode_with_offsets(
-                    model_tokenizer, run_text
+            run_key = tuple(int(token_id) for token_id in run_ids)
+            cached_run = run_cache.get(run_key) if run_cache is not None else None
+            if cached_run is None:
+                with timer("ctca.canvas.decode_committed_run"):
+                    run_text = _decode(master_tokenizer, run_ids)
+                with timer("ctca.canvas.retokenize_committed_run"):
+                    encoded_ids, character_offsets = encode_with_offsets(
+                        model_tokenizer, run_text
+                    )
+                if not encoded_ids:
+                    fallback_id = getattr(model_tokenizer, "unk_token_id", None)
+                    if fallback_id is None:
+                        raise ValueError("committed text produced no auxiliary token IDs")
+                    encoded_ids = [int(fallback_id)]
+                    character_offsets = [(0.0, float(max(1, len(run_text))))]
+                with timer("ctca.canvas.prefix_boundaries"):
+                    boundaries = tuple(_prefix_boundaries(master_tokenizer, run_ids))
+                cached_run = CachedCanvasRun(
+                    text=run_text,
+                    encoded_ids=tuple(int(token_id) for token_id in encoded_ids),
+                    character_offsets=tuple(
+                        (float(start), float(end))
+                        for start, end in character_offsets
+                    ),
+                    prefix_boundaries=boundaries,
                 )
-            if not encoded_ids:
-                fallback_id = getattr(model_tokenizer, "unk_token_id", None)
-                if fallback_id is None:
-                    raise ValueError("committed text produced no auxiliary token IDs")
-                encoded_ids = [int(fallback_id)]
-                character_offsets = [(0.0, float(max(1, len(run_text))))]
+                if run_cache is not None:
+                    run_cache[run_key] = cached_run
 
             with timer("ctca.canvas.map_offsets_to_master_slots"):
-                boundaries = _prefix_boundaries(master_tokenizer, run_ids)
-                native_generated_ids.extend(encoded_ids)
-                for start, end in character_offsets:
+                native_generated_ids.extend(cached_run.encoded_ids)
+                for start, end in cached_run.character_offsets:
                     native_offsets.append(
                         (
-                            _character_to_logical(start, boundaries, run_start),
-                            _character_to_logical(end, boundaries, run_start),
+                            _character_to_logical(
+                                start, cached_run.prefix_boundaries, run_start
+                            ),
+                            _character_to_logical(
+                                end, cached_run.prefix_boundaries, run_start
+                            ),
                         )
                     )
 

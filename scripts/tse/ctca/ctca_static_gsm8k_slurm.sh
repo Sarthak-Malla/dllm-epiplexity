@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=ctca-gsm8k-static
+#SBATCH --job-name=ctca-gsm8k-static-check-projection-mode
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=20:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --exclude=gpu-05,gpu-54,gpu-51
 #SBATCH -p cscc-gpu-p
@@ -30,6 +30,7 @@ progress_wandb="${progress_wandb:-false}"
 progress_wandb_project="${progress_wandb_project:-dllm-tse}"
 progress_wandb_entity="${progress_wandb_entity:-}"
 progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
+ctca_canvas_workers="${ctca_canvas_workers:-8}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -69,6 +70,7 @@ progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 : "${progress_wandb:?progress_wandb is required}"
 : "${progress_wandb_project:?progress_wandb_project is required}"
 : "${progress_wandb_log_interval:?progress_wandb_log_interval is required}"
+: "${ctca_canvas_workers:?ctca_canvas_workers is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -83,6 +85,7 @@ export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export CTCA_CANVAS_WORKERS="${ctca_canvas_workers}"
 
 RESULT_PATH=".logs/ctca_${task}_${experiment_name}_${SLURM_JOB_ID}.json"
 RUN_NAME="ctca-${task}-${experiment_name}-${SLURM_JOB_ID}"

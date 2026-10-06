@@ -78,6 +78,18 @@ class SlowToyTokenizer(ToyTokenizer):
         return super().__call__(text, return_offsets_mapping=False, **kwargs)
 
 
+class CountingToyTokenizer(ToyTokenizer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.encode_calls = 0
+
+    def __call__(self, text, *, return_offsets_mapping=False, **kwargs):
+        self.encode_calls += 1
+        return super().__call__(
+            text, return_offsets_mapping=return_offsets_mapping, **kwargs
+        )
+
+
 @pytest.mark.parametrize(
     ("auxiliary", "master", "expected"),
     [
@@ -127,6 +139,83 @@ def test_model_canvas_uses_native_mask_and_allows_different_length():
     assert view.generation_length == 4
     assert view.overlap_matrix.shape == (4, 3)
     assert view.overlap_matrix.to_dense()[-1].tolist() == [0.0, 0.0, 1.0]
+
+
+def test_model_canvas_run_cache_preserves_view_outputs():
+    master = ToyTokenizer(
+        ["ab", "c", "d", "[PAD]", "[MASK]"],
+        mask_token="[MASK]",
+        pad_token="[PAD]",
+    )
+    auxiliary = ToyTokenizer(
+        ["a", "b", "c", "d", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+
+    uncached = build_model_canvas_view(
+        [0],
+        [0, 1, master.mask_token_id, 0, 1],
+        master_tokenizer=master,
+        model_tokenizer=auxiliary,
+        master_mask_token_id=master.mask_token_id,
+        model_mask_token_id=auxiliary.mask_token_id,
+    )
+    cached = build_model_canvas_view(
+        [0],
+        [0, 1, master.mask_token_id, 0, 1],
+        master_tokenizer=master,
+        model_tokenizer=auxiliary,
+        master_mask_token_id=master.mask_token_id,
+        model_mask_token_id=auxiliary.mask_token_id,
+        run_cache={},
+    )
+
+    assert torch.equal(cached.input_ids, uncached.input_ids)
+    assert cached.offsets == uncached.offsets
+    assert cached.generation_start == uncached.generation_start
+    assert torch.allclose(
+        cached.overlap_matrix.to_dense(), uncached.overlap_matrix.to_dense()
+    )
+
+
+def test_model_canvas_run_cache_reuses_retokenized_committed_runs():
+    master = ToyTokenizer(
+        ["ab", "c", "[PAD]", "[MASK]"],
+        mask_token="[MASK]",
+        pad_token="[PAD]",
+    )
+    auxiliary = CountingToyTokenizer(
+        ["a", "b", "c", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    run_cache = {}
+
+    first = build_model_canvas_view(
+        [0],
+        [0, 1, master.mask_token_id, 0, 1],
+        master_tokenizer=master,
+        model_tokenizer=auxiliary,
+        master_mask_token_id=master.mask_token_id,
+        model_mask_token_id=auxiliary.mask_token_id,
+        run_cache=run_cache,
+    )
+    assert auxiliary.encode_calls == 1
+
+    second = build_model_canvas_view(
+        [0],
+        [0, 1, master.mask_token_id, 0, 1],
+        master_tokenizer=master,
+        model_tokenizer=auxiliary,
+        master_mask_token_id=master.mask_token_id,
+        model_mask_token_id=auxiliary.mask_token_id,
+        run_cache=run_cache,
+    )
+
+    assert auxiliary.encode_calls == 1
+    assert torch.equal(second.input_ids, first.input_ids)
+    assert second.offsets == first.offsets
 
 
 def test_slow_tokenizer_offsets_are_derived_from_decoded_prefixes():

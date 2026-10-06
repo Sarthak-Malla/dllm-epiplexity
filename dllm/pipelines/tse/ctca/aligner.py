@@ -169,8 +169,27 @@ class CrossTokenizerAligner:
         overlap_matrix: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply sparse spatial warping and chunked vocabulary projection."""
+        spatial = self.spatial_warp_model_probabilities(
+            auxiliary_id,
+            probabilities_aux,
+            offsets_aux,
+            offsets_master,
+            overlap_matrix=overlap_matrix,
+        )
+        return self.project_spatial_probabilities(auxiliary_id, spatial)
+
+    def spatial_warp_model_probabilities(
+        self,
+        auxiliary_id: str,
+        probabilities_aux: torch.Tensor,
+        offsets_aux,
+        offsets_master,
+        *,
+        overlap_matrix: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Warp auxiliary-token probabilities onto master canvas positions."""
         try:
-            registration = self.auxiliary_models[auxiliary_id]
+            self.auxiliary_models[auxiliary_id]
         except KeyError as error:
             raise KeyError(f"unknown CTCA auxiliary model: {auxiliary_id}") from error
         if overlap_matrix is None:
@@ -186,15 +205,26 @@ class CrossTokenizerAligner:
                 device=probabilities_aux.device, dtype=probabilities_aux.dtype
             )
         with timer("ctca.aligner.spatial_warp"):
-            spatial = spatial_warp_probabilities(probabilities_aux, overlap)
+            return spatial_warp_probabilities(probabilities_aux, overlap)
+
+    def project_spatial_probabilities(
+        self,
+        auxiliary_id: str,
+        spatial_probabilities: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project already warped auxiliary probabilities into master vocabulary."""
+        try:
+            registration = self.auxiliary_models[auxiliary_id]
+        except KeyError as error:
+            raise KeyError(f"unknown CTCA auxiliary model: {auxiliary_id}") from error
         if registration.projection_mode == "sparse_topk":
             with timer("ctca.projection.prepare"):
                 top_indices, top_weights = self._sparse_topk_projection(
-                    registration, probabilities_aux.device
+                    registration, spatial_probabilities.device
                 )
             with timer("ctca.aligner.vocab_projection"):
                 return project_vocab_sparse_topk(
-                    spatial,
+                    spatial_probabilities,
                     top_indices,
                     top_weights,
                     master_vocab_size=self.master_embeddings.shape[0],
@@ -203,12 +233,14 @@ class CrossTokenizerAligner:
 
         with timer("ctca.projection.prepare"):
             normalized_auxiliary = self._normalized_aligned_auxiliary_embeddings(
-                registration, probabilities_aux.device
+                registration, spatial_probabilities.device
             )
-            normalized_master = self._normalized_master_embeddings(probabilities_aux.device)
+            normalized_master = self._normalized_master_embeddings(
+                spatial_probabilities.device
+            )
         with timer("ctca.aligner.vocab_projection"):
             return project_vocab_from_normalized_fused(
-                spatial,
+                spatial_probabilities,
                 normalized_auxiliary,
                 normalized_master,
                 temperature=registration.temperature,
