@@ -47,11 +47,12 @@ class CTCATSESampler:
         auxiliary_id: str,
         cache_dir: str | None = ".cache/ctca",
         force_rebuild: bool = False,
+        anchor_temperature: float = 0.01,
         projection_temperature: float = 0.05,
         projection_chunk_size: int = 2500,
-        projection_mode: str = "exact",
+        projection_mode: str = "sparse_topk",
         projection_top_k: int = 64,
-        num_anchors: int = 3000,
+        num_anchors: int | str = "auto",
         min_anchors: int = 128,
         master_cache_id: str | None = None,
         auxiliary_cache_id: str | None = None,
@@ -74,6 +75,7 @@ class CTCATSESampler:
         self.last_aligned_probabilities: list[
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         ] = []
+        self._valid_token_id_masks: dict[tuple[int, int, str], torch.Tensor] = {}
 
         master_embeddings = self.master_model.get_input_embeddings().weight.detach()
         auxiliary_embeddings = (
@@ -91,6 +93,7 @@ class CTCATSESampler:
                 auxiliary_cache_id or auxiliary_id,
                 auxiliary_tokenizer,
                 auxiliary_embeddings,
+                anchor_temperature=anchor_temperature,
                 temperature=projection_temperature,
                 chunk_size=projection_chunk_size,
                 projection_mode=projection_mode,
@@ -99,6 +102,60 @@ class CTCATSESampler:
                 min_anchors=min_anchors,
             )
         self._aligner_auxiliary_id = auxiliary_cache_id or auxiliary_id
+        self.aligner.warm_projection_cache(self._aligner_auxiliary_id, self.master_device)
+        self.ctca_projection_diagnostics = self.aligner.projection_diagnostics(
+            self._aligner_auxiliary_id
+        )
+
+    def _valid_token_id_mask(
+        self,
+        tokenizer,
+        vocabulary_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return a mask for model IDs that have a tokenizer entry."""
+        key = (id(tokenizer), vocabulary_size, str(device))
+        cached = self._valid_token_id_masks.get(key)
+        if cached is not None:
+            return cached
+
+        token_ids = {
+            int(token_id)
+            for token_id in tokenizer.get_vocab().values()
+            if 0 <= int(token_id) < vocabulary_size
+        }
+        if not token_ids:
+            raise ValueError("Tokenizer has no IDs in the model vocabulary")
+        mask = torch.zeros(vocabulary_size, dtype=torch.bool, device=device)
+        mask[list(token_ids)] = True
+        self._valid_token_id_masks[key] = mask
+        return mask
+
+    def _mask_unassigned_token_logits(
+        self,
+        logits: torch.Tensor,
+        tokenizer,
+    ) -> torch.Tensor:
+        """Exclude model output rows that do not map to tokenizer tokens."""
+        valid_ids = self._valid_token_id_mask(
+            tokenizer, logits.shape[-1], logits.device
+        )
+        return logits.masked_fill(~valid_ids, torch.finfo(logits.dtype).min)
+
+    def _mask_unassigned_token_probabilities(
+        self,
+        probabilities: torch.Tensor,
+        tokenizer,
+    ) -> torch.Tensor:
+        """Remove unassigned token mass and renormalize each distribution."""
+        valid_ids = self._valid_token_id_mask(
+            tokenizer, probabilities.shape[-1], probabilities.device
+        )
+        filtered = probabilities * valid_ids.to(probabilities.dtype)
+        mass = filtered.sum(dim=-1, keepdim=True)
+        if torch.any(mass <= 0):
+            raise ValueError("CTCA projection assigned no mass to tokenizer IDs")
+        return filtered / mass
 
     def _derive_auxiliary_prompt(self, master_prompt: torch.Tensor) -> torch.Tensor:
         text = self.master_tokenizer.decode(
@@ -253,7 +310,10 @@ class CTCATSESampler:
                 block_size=block_size,
             )
             master_probabilities = logits_to_probabilities(
-                master_logits[active_mask.to(self.master_device)].to(fusion_device),
+                self._mask_unassigned_token_logits(
+                    master_logits[active_mask.to(self.master_device)].to(fusion_device),
+                    self.master_tokenizer,
+                ),
                 temperature_master,
             )
         if block_index is None:
@@ -277,7 +337,10 @@ class CTCATSESampler:
                 ]
                 generated_logits = auxiliary_logits[sample_index, view.generation_slice]
                 auxiliary_probabilities = logits_to_probabilities(
-                    generated_logits.to(fusion_device), temperature_auxiliary
+                    self._mask_unassigned_token_logits(
+                        generated_logits.to(fusion_device), self.auxiliary_tokenizer
+                    ),
+                    temperature_auxiliary,
                 )
                 overlap_matrix = view.overlap_matrix if block_index is None else None
                 spatial = self.aligner.spatial_warp_model_probabilities(
@@ -293,6 +356,9 @@ class CTCATSESampler:
             projected_auxiliary = self.aligner.project_spatial_probabilities(
                 self._aligner_auxiliary_id,
                 spatial_auxiliary,
+            )
+            projected_auxiliary = self._mask_unassigned_token_probabilities(
+                projected_auxiliary, self.master_tokenizer
             )
             active_positions = active_mask.nonzero(as_tuple=False)
         if trace_callback is not None:
@@ -517,7 +583,11 @@ class CTCATSESampler:
                             divergence, weighting.weights_a, epsilon
                         )
                         confidence, predicted_tokens = fused_confidence(fused)
-                        scores = consensus_scores(confidence, agreement)
+                        consensus = consensus_scores(confidence, agreement)
+                        # Rank positions by their fused top-token probability. Keep
+                        # Jensen-Shannon agreement as a diagnostic rather than
+                        # allowing it to suppress high-confidence candidates.
+                        scores = confidence
                     else:
                         selected_probabilities = (
                             master_probabilities
@@ -545,6 +615,11 @@ class CTCATSESampler:
                             "active_positions": active_positions.detach().cpu(),
                             "predicted_tokens": predicted_tokens.detach().cpu(),
                             "scores": scores.detach().cpu(),
+                            "consensus_scores": (
+                                consensus.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
                             "master_probabilities": master_probabilities.detach().cpu(),
                             "auxiliary_probabilities": (
                                 auxiliary_probabilities.detach().cpu()

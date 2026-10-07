@@ -120,3 +120,26 @@ def test_ctca_rejects_invalid_projection_top_k():
 
     with pytest.raises(ValueError, match="ctca_projection_top_k"):
         _validate_config(config)
+
+
+def test_ctca_accepts_auto_num_anchors():
+    config = TSEConfig(
+        model_a_path="a",
+        model_b_path="b",
+        ctca_enabled=True,
+        ctca_num_anchors="auto",
+    )
+
+    _validate_config(config)
+
+
+def test_ctca_rejects_invalid_anchor_temperature():
+    config = TSEConfig(
+        model_a_path="a",
+        model_b_path="b",
+        ctca_enabled=True,
+        ctca_anchor_temperature=0.0,
+    )
+
+    with pytest.raises(ValueError, match="ctca_anchor_temperature"):
+        _validate_config(config)

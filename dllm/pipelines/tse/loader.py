@@ -100,6 +100,8 @@ def _validate_config(config: TSEConfig) -> None:
         return
     if config.master_model not in {"a", "b"}:
         raise ValueError("master_model must be 'a' or 'b'")
+    if config.ctca_anchor_temperature <= 0:
+        raise ValueError("ctca_anchor_temperature must be positive")
     if config.ctca_projection_temperature <= 0:
         raise ValueError("ctca_projection_temperature must be positive")
     if config.ctca_chunk_size < 1:
@@ -108,11 +110,19 @@ def _validate_config(config: TSEConfig) -> None:
         raise ValueError("ctca_projection_mode must be 'exact' or 'sparse_topk'")
     if config.ctca_projection_top_k < 1:
         raise ValueError("ctca_projection_top_k must be positive")
-    if (
-        config.ctca_min_anchors < 1
-        or config.ctca_min_anchors > config.ctca_num_anchors
-    ):
-        raise ValueError("ctca_min_anchors must be between 1 and ctca_num_anchors")
+    if config.ctca_min_anchors < 1:
+        raise ValueError("ctca_min_anchors must be positive")
+    if isinstance(config.ctca_num_anchors, str):
+        if config.ctca_num_anchors.casefold() != "auto":
+            try:
+                config.ctca_num_anchors = int(config.ctca_num_anchors)
+            except ValueError as error:
+                raise ValueError("ctca_num_anchors must be positive or 'auto'") from error
+    if not isinstance(config.ctca_num_anchors, str):
+        if config.ctca_num_anchors < 1:
+            raise ValueError("ctca_num_anchors must be positive or 'auto'")
+        if config.ctca_min_anchors > config.ctca_num_anchors:
+            raise ValueError("ctca_min_anchors must be <= ctca_num_anchors")
 
 
 def _validate_model(

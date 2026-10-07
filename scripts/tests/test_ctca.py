@@ -19,6 +19,11 @@ from dllm.pipelines.tse.ctca.projection import (
     project_vocab_fused,
     project_vocab_sparse_topk,
 )
+from dllm.pipelines.tse.ctca.relative import (
+    build_sparse_topk_relative_anchor_projection,
+    collect_relative_anchor_ids,
+    project_vocab_relative_exact,
+)
 
 
 class ToyTokenizer:
@@ -277,6 +282,142 @@ def test_procrustes_rejects_too_few_shared_anchors():
         )
 
 
+def test_relative_anchor_selection_supports_auto_and_integer_caps():
+    auxiliary_tokenizer = ToyTokenizer(
+        ["a", "b", "c", "x", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    master_tokenizer = ToyTokenizer(
+        ["a", "b", "c", "y", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+
+    auto = collect_relative_anchor_ids(
+        auxiliary_tokenizer,
+        master_tokenizer,
+        auxiliary_vocab_size=6,
+        master_vocab_size=6,
+        num_anchors="auto",
+        min_anchors=3,
+    )
+    capped = collect_relative_anchor_ids(
+        auxiliary_tokenizer,
+        master_tokenizer,
+        auxiliary_vocab_size=6,
+        master_vocab_size=6,
+        num_anchors=2,
+        min_anchors=2,
+    )
+
+    assert auto.total_anchors == 3
+    assert auto.selected_anchors == 3
+    assert capped.selected_anchors == 2
+
+
+def test_relative_anchor_rejects_too_few_shared_anchors():
+    auxiliary_tokenizer = ToyTokenizer(
+        ["a", "x", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    master_tokenizer = ToyTokenizer(
+        ["a", "y", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+
+    with pytest.raises(ValueError, match="too few shared anchors"):
+        collect_relative_anchor_ids(
+            auxiliary_tokenizer,
+            master_tokenizer,
+            auxiliary_vocab_size=4,
+            master_vocab_size=4,
+            num_anchors="auto",
+            min_anchors=2,
+        )
+
+
+def test_relative_anchor_sparse_maps_matching_tokens_with_unequal_dimensions():
+    auxiliary = F.normalize(
+        torch.tensor(
+            [
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 2.0],
+                [1.0, 1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        dim=-1,
+    )
+    master = F.normalize(
+        torch.tensor(
+            [
+                [3.0, 0.0],
+                [0.0, 3.0],
+                [2.0, 2.0],
+            ],
+            dtype=torch.float32,
+        ),
+        dim=-1,
+    )
+
+    top_indices, top_weights = build_sparse_topk_relative_anchor_projection(
+        auxiliary,
+        auxiliary[:2],
+        master,
+        master[:2],
+        top_k=1,
+        anchor_temperature=0.01,
+        projection_temperature=0.05,
+        chunk_size=2,
+    )
+
+    assert top_indices[:2, 0].tolist() == [0, 1]
+    assert top_weights.shape == (4, 1)
+
+
+def test_relative_anchor_sparse_matches_exact_when_topk_covers_vocab():
+    spatial = torch.tensor([[0.6, 0.4]], dtype=torch.float32)
+    auxiliary = F.normalize(
+        torch.tensor([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=torch.float32),
+        dim=-1,
+    )
+    master = F.normalize(
+        torch.tensor([[3.0, 0.0], [0.0, 3.0], [2.0, 2.0]], dtype=torch.float32),
+        dim=-1,
+    )
+
+    top_indices, top_weights = build_sparse_topk_relative_anchor_projection(
+        auxiliary,
+        auxiliary,
+        master,
+        master[:2],
+        top_k=master.shape[0],
+        anchor_temperature=0.05,
+        projection_temperature=0.4,
+        chunk_size=1,
+    )
+    sparse = project_vocab_sparse_topk(
+        spatial,
+        top_indices,
+        top_weights,
+        master_vocab_size=master.shape[0],
+        chunk_size=1,
+    )
+    exact = project_vocab_relative_exact(
+        spatial,
+        auxiliary,
+        auxiliary,
+        master,
+        master[:2],
+        anchor_temperature=0.05,
+        projection_temperature=0.4,
+        chunk_size=1,
+    )
+
+    assert torch.allclose(sparse, exact, atol=1e-6)
+    assert torch.allclose(sparse.sum(dim=-1), torch.ones(1), atol=1e-6)
+
+
 def test_chunked_projection_matches_dense_and_normalizes_rows():
     spatial = torch.tensor([[0.6, 0.3, 0.1], [0.2, 0.2, 0.6]])
     auxiliary = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
@@ -362,3 +503,36 @@ def test_cache_reuses_pair_signature_and_rejects_malformed_metadata(tmp_path):
     )
     with pytest.raises(ValueError, match="Malformed CTCA cache metadata"):
         manager.get_or_create(malformed_metadata, builder)
+
+
+def test_cache_reuses_tensor_payloads(tmp_path):
+    metadata = {"auxiliary_id": "aux", "master_id": "master", "anchors": 4}
+    calls = 0
+
+    def builder():
+        nonlocal calls
+        calls += 1
+        return {
+            "top_indices": torch.tensor([[0, 1]], dtype=torch.long),
+            "top_weights": torch.tensor([[0.7, 0.3]], dtype=torch.float32),
+        }
+
+    manager = CTCACacheManager(tmp_path)
+    first, first_rebuilt = manager.get_or_create_tensors(
+        metadata,
+        artifact="relative_sparse_topk",
+        builder=builder,
+        required_keys=("top_indices", "top_weights"),
+    )
+    second, second_rebuilt = CTCACacheManager(tmp_path).get_or_create_tensors(
+        metadata,
+        artifact="relative_sparse_topk",
+        builder=builder,
+        required_keys=("top_indices", "top_weights"),
+    )
+
+    assert first_rebuilt is True
+    assert second_rebuilt is False
+    assert calls == 1
+    assert torch.equal(first["top_indices"], second["top_indices"])
+    assert torch.equal(first["top_weights"], second["top_weights"])

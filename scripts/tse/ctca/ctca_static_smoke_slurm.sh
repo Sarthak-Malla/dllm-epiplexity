@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=ctca-static-smoke
+#SBATCH --job-name=ctca-static-smoke-test-relative-anchor-max-fuse
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=00:20:00
+#SBATCH --time=01:20:00
 #SBATCH --nodes=1
 #SBATCH --exclude=gpu-05,gpu-54,gpu-51
 #SBATCH -p cscc-gpu-p
@@ -47,6 +47,7 @@ ctca_canvas_workers="${ctca_canvas_workers:-8}"
 : "${top_k:?top_k is required}"
 : "${ctca_cache_dir:?ctca_cache_dir is required}"
 : "${ctca_force_rebuild:?ctca_force_rebuild is required}"
+: "${ctca_anchor_temperature:?ctca_anchor_temperature is required}"
 : "${ctca_projection_temperature:?ctca_projection_temperature is required}"
 : "${ctca_chunk_size:?ctca_chunk_size is required}"
 : "${ctca_projection_mode:?ctca_projection_mode is required}"
@@ -59,6 +60,44 @@ ctca_canvas_workers="${ctca_canvas_workers:-8}"
 source /apps/local/conda_init.sh
 conda activate dllm
 set -u
+
+echo "===== CTCA smoke run config ====="
+echo "CONFIG_PATH=${CONFIG_PATH}"
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
+echo "SLURM_JOB_NAME=${SLURM_JOB_NAME:-}"
+echo "HOSTNAME=$(hostname)"
+echo "DATE=$(date --iso-8601=seconds)"
+echo "model_a=${model_a}"
+echo "model_b=${model_b}"
+echo "master_model=${master_model}"
+echo "model_a_device=${model_a_device}"
+echo "model_b_device=${model_b_device}"
+echo "fusion_device=${fusion_device}"
+echo "dtype=${dtype}"
+echo "max_new_tokens=${max_new_tokens}"
+echo "steps=${steps}"
+echo "block_size=${block_size}"
+echo "selection_mode=${selection_mode}"
+echo "weighting_mode=${weighting_mode}"
+echo "alpha=${alpha}"
+echo "temperature_a=${temperature_a}"
+echo "temperature_b=${temperature_b}"
+echo "weight_temperature=${weight_temperature}"
+echo "temperature=${temperature}"
+echo "remasking=${remasking}"
+echo "top_k=${top_k}"
+echo "ctca_cache_dir=${ctca_cache_dir}"
+echo "ctca_force_rebuild=${ctca_force_rebuild}"
+echo "ctca_anchor_temperature=${ctca_anchor_temperature}"
+echo "ctca_projection_temperature=${ctca_projection_temperature}"
+echo "ctca_chunk_size=${ctca_chunk_size}"
+echo "ctca_projection_mode=${ctca_projection_mode}"
+echo "ctca_projection_top_k=${ctca_projection_top_k}"
+echo "ctca_num_anchors=${ctca_num_anchors}"
+echo "ctca_min_anchors=${ctca_min_anchors}"
+echo "ctca_canvas_workers=${ctca_canvas_workers}"
+echo "question=${question}"
+echo "================================="
 
 srun nvidia-smi
 
@@ -97,6 +136,7 @@ python scripts/tse/smoke.py \
     --ctca \
     --master-model "${master_model}" \
     --ctca-cache-dir "${ctca_cache_dir}" \
+    --ctca-anchor-temperature "${ctca_anchor_temperature}" \
     --ctca-projection-temperature "${ctca_projection_temperature}" \
     --ctca-chunk-size "${ctca_chunk_size}" \
     --ctca-projection-mode "${ctca_projection_mode}" \

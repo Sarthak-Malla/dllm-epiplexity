@@ -67,13 +67,16 @@ class TSEEvalHarness(LM):
             master_model=kwargs.get("master_model", "a"),
             ctca_cache_dir=kwargs.get("ctca_cache_dir", ".cache/ctca"),
             ctca_force_rebuild=_as_bool(kwargs.get("ctca_force_rebuild", False)),
+            ctca_anchor_temperature=float(
+                kwargs.get("ctca_anchor_temperature", 0.01)
+            ),
             ctca_projection_temperature=float(
                 kwargs.get("ctca_projection_temperature", 0.05)
             ),
             ctca_chunk_size=int(kwargs.get("ctca_chunk_size", 2500)),
-            ctca_projection_mode=kwargs.get("ctca_projection_mode", "exact"),
+            ctca_projection_mode=kwargs.get("ctca_projection_mode", "sparse_topk"),
             ctca_projection_top_k=int(kwargs.get("ctca_projection_top_k", 64)),
-            ctca_num_anchors=int(kwargs.get("ctca_num_anchors", 3000)),
+            ctca_num_anchors=kwargs.get("ctca_num_anchors", "auto"),
             ctca_min_anchors=int(kwargs.get("ctca_min_anchors", 128)),
         )
         self.selection_mode = kwargs.get("selection_mode", "tse")
@@ -126,6 +129,7 @@ class TSEEvalHarness(LM):
                 auxiliary_id=auxiliary_name,
                 cache_dir=self.config.ctca_cache_dir,
                 force_rebuild=self.config.ctca_force_rebuild,
+                anchor_temperature=self.config.ctca_anchor_temperature,
                 projection_temperature=self.config.ctca_projection_temperature,
                 projection_chunk_size=self.config.ctca_chunk_size,
                 projection_mode=self.config.ctca_projection_mode,
@@ -190,8 +194,12 @@ class TSEEvalHarness(LM):
             "steps": self.config.steps,
             "block_size": self.config.block_size,
             "ctca_enabled": self.config.ctca_enabled,
+            "ctca_anchor_temperature": self.config.ctca_anchor_temperature,
+            "ctca_projection_temperature": self.config.ctca_projection_temperature,
             "ctca_projection_mode": self.config.ctca_projection_mode,
             "ctca_projection_top_k": self.config.ctca_projection_top_k,
+            "ctca_num_anchors": self.config.ctca_num_anchors,
+            "ctca_min_anchors": self.config.ctca_min_anchors,
         }
         init_kwargs = {
             "project": self._progress_wandb_project,

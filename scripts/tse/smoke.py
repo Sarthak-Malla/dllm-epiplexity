@@ -74,15 +74,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-model", choices=("a", "b"), default="a")
     parser.add_argument("--ctca-cache-dir", default=".cache/ctca")
     parser.add_argument("--ctca-force-rebuild", action="store_true")
+    parser.add_argument("--ctca-anchor-temperature", type=float, default=0.01)
     parser.add_argument("--ctca-projection-temperature", type=float, default=0.05)
     parser.add_argument("--ctca-chunk-size", type=int, default=2500)
     parser.add_argument(
         "--ctca-projection-mode",
         choices=("exact", "sparse_topk"),
-        default="exact",
+        default="sparse_topk",
     )
     parser.add_argument("--ctca-projection-top-k", type=int, default=64)
-    parser.add_argument("--ctca-num-anchors", type=int, default=3000)
+    parser.add_argument("--ctca-num-anchors", default="auto")
     parser.add_argument("--ctca-min-anchors", type=int, default=128)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
@@ -135,6 +136,9 @@ def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
 def _decode_token(tokenizer, token_id: int) -> str:
     if token_id == tokenizer.mask_token_id:
         return "[Mask]"
+    token = tokenizer.convert_ids_to_tokens(token_id)
+    if token is None:
+        return f"<unassigned:{token_id}>"
     return tokenizer.decode(
         [token_id],
         skip_special_tokens=False,
@@ -305,8 +309,15 @@ def make_ctca_trace_logger(
                     f"{_decode_token(master_tokenizer, int(token_id))!r}, "
                     f"master={float(master_probability):.6f}, "
                     f"projected_aux={float(auxiliary_probability):.6f}, "
-                    f"{fused_text}, score={float(score):.6f}, {weight_text}"
+                    f"{fused_text}, fused_top_probability={float(score):.6f}, "
+                    f"{weight_text}"
                 )
+                consensus_scores = payload.get("consensus_scores")
+                if consensus_scores is not None:
+                    print(
+                        "    Jensen-Shannon consensus diagnostic: "
+                        f"{float(consensus_scores[index]):.6f}"
+                    )
                 print(
                     f"    {labels[auxiliary_id]} projected to {labels[master_id]} top-k: "
                     f"{top_probabilities(master_tokenizer, payload['auxiliary_probabilities'][index])}"
@@ -345,6 +356,7 @@ def main() -> None:
         master_model=args.master_model,
         ctca_cache_dir=args.ctca_cache_dir,
         ctca_force_rebuild=args.ctca_force_rebuild,
+        ctca_anchor_temperature=args.ctca_anchor_temperature,
         ctca_projection_temperature=args.ctca_projection_temperature,
         ctca_chunk_size=args.ctca_chunk_size,
         ctca_projection_mode=args.ctca_projection_mode,
@@ -410,6 +422,7 @@ def main() -> None:
             auxiliary_id=auxiliary_name,
             cache_dir=args.ctca_cache_dir,
             force_rebuild=args.ctca_force_rebuild,
+            anchor_temperature=args.ctca_anchor_temperature,
             projection_temperature=args.ctca_projection_temperature,
             projection_chunk_size=args.ctca_chunk_size,
             projection_mode=args.ctca_projection_mode,
@@ -419,6 +432,9 @@ def main() -> None:
             master_cache_id=getattr(args, f"model_{args.master_model}"),
             auxiliary_cache_id=getattr(args, f"model_{auxiliary_name}"),
         )
+        print("\nCTCA relative-anchor projection diagnostics:")
+        for key, value in sampler.ctca_projection_diagnostics.items():
+            print(f"  {key}: {value}")
     else:
         sampler = TSESampler(
             models.model_a,

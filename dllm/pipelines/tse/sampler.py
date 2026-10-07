@@ -23,7 +23,7 @@ class TSESampler:
     """Run paired forwards on one shared diffusion canvas.
 
     Baseline mode commits tokens using one selected model. TSE mode uses
-    probability fusion and consensus-based selection.
+    probability fusion and fused-confidence-based selection.
     """
 
     def __init__(
@@ -41,6 +41,7 @@ class TSESampler:
         self.model_b_device = torch.device(model_b_device)
         self.scheduler = LinearAlphaScheduler()
         self.last_paired_logits = []
+        self.last_consensus_scores: list[torch.Tensor] = []
 
     @torch.no_grad()
     @timer()
@@ -132,6 +133,7 @@ class TSESampler:
             attention_mask[index, : prompt_len + max_new_tokens] = 1
 
         self.last_paired_logits = []
+        self.last_consensus_scores = []
         num_blocks = math.ceil(max_new_tokens / block_size)
         steps_per_block = math.ceil(steps / num_blocks)
 
@@ -210,7 +212,13 @@ class TSESampler:
                         divergence, weighting.weights_a, epsilon
                     )
                     confidence, predicted_tokens = fused_confidence(fused)
-                    scores = consensus_scores(confidence, agreement)
+                    consensus = consensus_scores(confidence, agreement)
+                    if capture_logits:
+                        self.last_consensus_scores.append(consensus.detach().cpu())
+                    # Rank positions by their fused top-token probability. Keep the
+                    # Jensen-Shannon agreement calculation as a diagnostic rather
+                    # than allowing it to suppress high-confidence candidates.
+                    scores = confidence
 
                     x0 = canvas.clone()
                     confidence = torch.full_like(

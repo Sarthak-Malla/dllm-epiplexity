@@ -35,9 +35,10 @@ class TSEConfig:
     master_model: str = "a"
     ctca_cache_dir: str | None = ".cache/ctca"
     ctca_force_rebuild: bool = False
+    ctca_anchor_temperature: float = 0.01
     ctca_projection_temperature: float = 0.05
     ctca_chunk_size: int = 2500
-    ctca_projection_mode: str = "exact"
+    ctca_projection_mode: str = "sparse_topk"
     ctca_projection_top_k: int = 64
-    ctca_num_anchors: int = 3000
+    ctca_num_anchors: int | str = "auto"
     ctca_min_anchors: int = 128

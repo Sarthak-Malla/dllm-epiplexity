@@ -21,6 +21,13 @@ from .projection import (
     project_vocab_sparse_topk,
     project_vocab_with_rotation_fused,
 )
+from .relative import (
+    RelativeAnchorSelection,
+    build_sparse_topk_relative_anchor_projection,
+    collect_relative_anchor_ids,
+    project_vocab_relative_exact,
+    relative_anchor_profiles,
+)
 
 __all__ = [
     "AlignmentResult",
@@ -29,12 +36,17 @@ __all__ = [
     "CTCACacheManager",
     "CrossTokenizerAligner",
     "ModelCanvasView",
+    "RelativeAnchorSelection",
     "align_embeddings_procrustes",
     "build_canvas_overlap_matrix",
     "build_model_canvas_view",
     "build_sparse_topk_vocab_projection",
     "project_vocab_fused",
+    "build_sparse_topk_relative_anchor_projection",
+    "collect_relative_anchor_ids",
+    "project_vocab_relative_exact",
     "project_vocab_sparse_topk",
     "project_vocab_with_rotation_fused",
+    "relative_anchor_profiles",
     "spatial_warp_probabilities",
 ]
