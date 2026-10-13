@@ -63,7 +63,7 @@ export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 RESULT_PATH=".logs/tse_gsm8k_${experiment_name}_${SLURM_JOB_ID}.json"
-RUN_NAME="tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}"
+RUN_NAME="${wandb_run_name:-tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}}"
 
 MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking}"
 

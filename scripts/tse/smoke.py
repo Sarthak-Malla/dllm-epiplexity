@@ -11,7 +11,9 @@ decoded trace of every canvas, model prediction, alignment, and fusion step.
 """
 
 import argparse
+import json
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -42,6 +44,22 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Number of decoded candidates to print per CTCA model prediction.",
+    )
+    parser.add_argument(
+        "--trace-jsonl",
+        default=None,
+        help=(
+            "Optional JSONL destination for one record per CTCA forward position, "
+            "fusion candidate, and commit decision."
+        ),
+    )
+    parser.add_argument(
+        "--trace-tensors",
+        default=None,
+        help=(
+            "Optional .pt destination for full-vocabulary CTCA logits from the "
+            "first forward pass."
+        ),
     )
     parser.add_argument(
         "--baseline-model",
@@ -108,6 +126,14 @@ def print_import_summary() -> None:
     print("TSE package:", Path(tse.__file__).resolve())
 
 
+def synchronize_cuda_devices() -> None:
+    """Synchronize all visible CUDA devices before ending a smoke timer."""
+    if not torch.cuda.is_available():
+        return
+    for index in range(torch.cuda.device_count()):
+        torch.cuda.synchronize(index)
+
+
 def print_top_predictions(tokenizer, paired_logits, top_k: int) -> None:
     print("\nPaired active-position logits:")
     for step, (positions, logits_a, logits_b) in enumerate(paired_logits):
@@ -158,6 +184,8 @@ def make_ctca_trace_logger(
     master_tokenizer,
     auxiliary_tokenizer,
     top_k: int,
+    jsonl_path: str | None = None,
+    tensor_path: str | None = None,
 ):
     from dllm.pipelines.tse.ctca.canvas import build_model_canvas_view
 
@@ -165,6 +193,20 @@ def make_ctca_trace_logger(
         "a": "model A (LLaDA)",
         "b": "model B (Dream)",
     }
+    jsonl_handle = None
+    if jsonl_path is not None:
+        trace_path = Path(jsonl_path)
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        jsonl_handle = trace_path.open("w", encoding="utf-8")
+        print("CTCA structured trace:", trace_path.resolve())
+
+    trace_stats = {
+        "candidate_count": 0,
+        "selected_count": 0,
+        "jensen_shannon_total": 0.0,
+        "agreement_total": 0.0,
+    }
+    first_forward_saved = False
 
     def top_predictions(tokenizer, logits: torch.Tensor) -> str:
         values, token_ids = torch.topk(logits.float(), k=min(top_k, logits.shape[-1]))
@@ -182,7 +224,75 @@ def make_ctca_trace_logger(
             for value, token_id in zip(values, token_ids)
         )
 
+    def probability_entries(tokenizer, probabilities: torch.Tensor) -> list[dict]:
+        values, token_ids = torch.topk(
+            probabilities.float(), k=min(top_k, probabilities.shape[-1])
+        )
+        return [
+            {
+                "token_id": int(token_id),
+                "token": _decode_token(tokenizer, int(token_id)),
+                "probability": float(value),
+            }
+            for value, token_id in zip(values, token_ids)
+        ]
+
+    def logit_entries(tokenizer, logits: torch.Tensor) -> list[dict]:
+        values, token_ids = torch.topk(
+            logits.float(), k=min(top_k, logits.shape[-1])
+        )
+        return [
+            {
+                "token_id": int(token_id),
+                "token": _decode_token(tokenizer, int(token_id)),
+                "logit": float(value),
+            }
+            for value, token_id in zip(values, token_ids)
+        ]
+
+    def write_record(record: dict) -> None:
+        if jsonl_handle is None:
+            return
+        jsonl_handle.write(json.dumps(record, sort_keys=True) + "\n")
+        jsonl_handle.flush()
+
+    def active_position_contributors(payload: dict, active_index: int) -> list[dict]:
+        sample_index, absolute_position = payload["active_positions"][active_index].tolist()
+        prompt_len = int(payload["prompt_lens"][sample_index])
+        generation_position = int(absolute_position) - prompt_len
+        view = payload["views"][sample_index]
+        overlap = view.overlap_matrix.to_dense().cpu()
+        if generation_position < 0 or generation_position >= overlap.shape[1]:
+            return []
+        contributor_indices = torch.where(overlap[:, generation_position] > 0)[0]
+        contributors = []
+        for auxiliary_position in contributor_indices.tolist():
+            auxiliary_absolute = int(view.generation_slice.start) + auxiliary_position
+            contributors.append(
+                {
+                    "generation_position": auxiliary_position,
+                    "absolute_position": auxiliary_absolute,
+                    "canvas_token": _decode_token(
+                        auxiliary_tokenizer,
+                        int(view.input_ids[auxiliary_absolute]),
+                    ),
+                    "overlap": float(overlap[auxiliary_position, generation_position]),
+                    "raw_top_k": logit_entries(
+                        auxiliary_tokenizer,
+                        payload["auxiliary_logits_raw"][sample_index, auxiliary_absolute],
+                    ),
+                    "sampling_top_k": logit_entries(
+                        auxiliary_tokenizer,
+                        payload["auxiliary_logits_sampling"][
+                            sample_index, auxiliary_absolute
+                        ],
+                    ),
+                }
+            )
+        return contributors
+
     def log(event: str, payload: dict) -> None:
+        nonlocal first_forward_saved
         if event == "canvas":
             phase = payload["phase"]
             step = payload.get("step")
@@ -214,13 +324,42 @@ def make_ctca_trace_logger(
 
         if event == "forward":
             step = payload["step"]
+            if tensor_path is not None and not first_forward_saved:
+                destination = Path(tensor_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {
+                        "schema_version": 1,
+                        "source": "ctca",
+                        "step": tuple(step),
+                        "master_id": master_id,
+                        "master_prompt_lengths": tuple(payload["prompt_lens"]),
+                        "active_positions": payload["active_positions"],
+                        "master_logits_raw": payload["master_logits_raw"],
+                        "master_logits_sampling": payload[
+                            "master_logits_sampling"
+                        ],
+                        "master_logit_adapter": payload[
+                            "master_logit_adapter"
+                        ],
+                    },
+                    destination,
+                )
+                first_forward_saved = True
+                print("CTCA first-forward tensors:", destination.resolve())
             print(f"\n[CTCA step {step[0]}.{step[1]} model predictions]")
             canvas = payload["canvas"]
             active_positions = payload["active_positions"]
             active_mask = payload["active_mask"]
-            master_logits = payload["master_logits"]
-            auxiliary_logits = payload["auxiliary_logits"]
+            master_logits_raw = payload["master_logits_raw"]
+            master_logits_sampling = payload["master_logits_sampling"]
+            auxiliary_logits_sampling = payload["auxiliary_logits_sampling"]
             views = payload["views"]
+            print(
+                "  sampling-logit adapters: "
+                f"{labels[master_id]}={payload['master_logit_adapter']}, "
+                f"{labels[auxiliary_id]}={payload['auxiliary_logit_adapter']}"
+            )
             for sample_index, prompt_len in enumerate(payload["prompt_lens"]):
                 print(
                     f"  {labels[master_id]} state: "
@@ -228,20 +367,30 @@ def make_ctca_trace_logger(
                 )
                 master_active = active_mask[sample_index]
                 master_positions = torch.where(master_active)[0]
-                master_values = master_logits[sample_index, master_active]
-                for position, logits in zip(master_positions, master_values):
+                master_values_raw = master_logits_raw[sample_index, master_active]
+                master_values_sampling = master_logits_sampling[
+                    sample_index, master_active
+                ]
+                for position, raw_logits, sampling_logits in zip(
+                    master_positions, master_values_raw, master_values_sampling
+                ):
                     generation_position = int(position) - int(prompt_len)
                     print(
                         f"    abs pos {int(position)} gen pos {generation_position} -> "
-                        f"{top_predictions(master_tokenizer, logits)}"
+                        f"raw: {top_predictions(master_tokenizer, raw_logits)}"
                     )
+                    if not torch.equal(raw_logits, sampling_logits):
+                        print(
+                            "      sampling-adapted: "
+                            f"{top_predictions(master_tokenizer, sampling_logits)}"
+                        )
 
                 view = views[sample_index]
                 print(
                     f"  {labels[auxiliary_id]} state: "
                     f"{_decode_ids(auxiliary_tokenizer, view.input_ids.tolist())}"
                 )
-                auxiliary_generation = auxiliary_logits[
+                auxiliary_generation = auxiliary_logits_sampling[
                     sample_index, view.generation_slice
                 ]
                 auxiliary_mask = view.input_ids[view.generation_slice] == (
@@ -277,6 +426,51 @@ def make_ctca_trace_logger(
                         f"    gen {auxiliary_position} abs {auxiliary_absolute} "
                         f"{auxiliary_token!r} -> {mapped}"
                     )
+            for active_index, position in enumerate(active_positions.tolist()):
+                contributors = active_position_contributors(payload, active_index)
+                sample_index, absolute_position = position
+                prompt_len = int(payload["prompt_lens"][sample_index])
+                print(
+                    f"  spatial result batch={sample_index} abs pos={absolute_position} "
+                    f"gen pos={absolute_position - prompt_len}: "
+                    f"{top_probabilities(auxiliary_tokenizer, payload['spatial_auxiliary_probabilities'][active_index])}"
+                )
+                write_record(
+                    {
+                        "event": "forward_position",
+                        "step": list(step),
+                        "batch_index": int(sample_index),
+                        "master": {
+                            "absolute_position": int(absolute_position),
+                            "generation_position": int(absolute_position - prompt_len),
+                            "logit_adapter": payload["master_logit_adapter"],
+                            "raw_top_k": logit_entries(
+                                master_tokenizer,
+                                master_logits_raw[sample_index, absolute_position],
+                            ),
+                            "sampling_top_k": logit_entries(
+                                master_tokenizer,
+                                master_logits_sampling[
+                                    sample_index, absolute_position
+                                ],
+                            ),
+                        },
+                        "auxiliary": {
+                            "logit_adapter": payload["auxiliary_logit_adapter"],
+                            "contributors": contributors,
+                        },
+                        "spatial_warp": {
+                            "top_k": probability_entries(
+                                auxiliary_tokenizer,
+                                payload["spatial_auxiliary_probabilities"][active_index],
+                            ),
+                        },
+                        "vocabulary_projection": {
+                            "mode": payload["projection_mode"],
+                            "route": "relative_anchor_only",
+                        },
+                    }
+                )
             return
 
         if event == "fusion":
@@ -289,10 +483,14 @@ def make_ctca_trace_logger(
                     payload["scores"].tolist(),
                 )
             ):
-                weight = payload["weights_a"]
+                weight = payload["master_weights"]
                 weight_text = "baseline"
                 if weight is not None:
-                    weight_text = f"model A weight={float(weight[index]):.3f}"
+                    auxiliary_weight = payload["auxiliary_weights"][index]
+                    weight_text = (
+                        f"master weight={float(weight[index]):.3f}, "
+                        f"auxiliary weight={float(auxiliary_weight):.3f}"
+                    )
                 master_probability = payload["master_probabilities"][
                     index, int(token_id)
                 ]
@@ -309,13 +507,20 @@ def make_ctca_trace_logger(
                     f"{_decode_token(master_tokenizer, int(token_id))!r}, "
                     f"master={float(master_probability):.6f}, "
                     f"projected_aux={float(auxiliary_probability):.6f}, "
-                    f"{fused_text}, fused_top_probability={float(score):.6f}, "
-                    f"{weight_text}"
+                    f"{fused_text}, selection_score="
+                    f"{payload['selection_score_name']}={float(score):.6f}, {weight_text}"
                 )
+                divergence = payload.get("jensen_shannon_divergence")
+                agreement = payload.get("agreement_scores")
+                if divergence is not None:
+                    print(
+                        f"    Jensen-Shannon divergence={float(divergence[index]):.6f}, "
+                        f"agreement={float(agreement[index]):.6f}"
+                    )
                 consensus_scores = payload.get("consensus_scores")
                 if consensus_scores is not None:
                     print(
-                        "    Jensen-Shannon consensus diagnostic: "
+                        "    confidence-times-agreement diagnostic: "
                         f"{float(consensus_scores[index]):.6f}"
                     )
                 print(
@@ -327,11 +532,158 @@ def make_ctca_trace_logger(
                         "    fused top-k: "
                         f"{top_probabilities(master_tokenizer, fused_probabilities[index])}"
                     )
+                trace_stats["candidate_count"] += 1
+                if divergence is not None:
+                    trace_stats["jensen_shannon_total"] += float(divergence[index])
+                    trace_stats["agreement_total"] += float(agreement[index])
+                write_record(
+                    {
+                        "event": "fusion_candidate",
+                        "step": list(step),
+                        "batch_index": int(position[0]),
+                        "absolute_position": int(position[1]),
+                        "predicted_token": {
+                            "token_id": int(token_id),
+                            "token": _decode_token(master_tokenizer, int(token_id)),
+                            "is_assigned_token_id": bool(
+                                payload["candidate_is_assigned"][index]
+                            ),
+                        },
+                        "master_probability": float(master_probability),
+                        "projected_auxiliary_probability": float(auxiliary_probability),
+                        "fused_probability": (
+                            float(fused_probabilities[index, int(token_id)])
+                            if fused_probabilities is not None
+                            else None
+                        ),
+                        "selection_score": {
+                            "name": payload["selection_score_name"],
+                            "value": float(score),
+                        },
+                        "jensen_shannon_divergence": (
+                            float(divergence[index]) if divergence is not None else None
+                        ),
+                        "agreement": (
+                            float(agreement[index]) if agreement is not None else None
+                        ),
+                        "confidence_times_agreement": (
+                            float(consensus_scores[index])
+                            if consensus_scores is not None
+                            else None
+                        ),
+                        "weights": (
+                            {
+                                "master": float(payload["master_weights"][index]),
+                                "auxiliary": float(
+                                    payload["auxiliary_weights"][index]
+                                ),
+                            }
+                            if payload["master_weights"] is not None
+                            else None
+                        ),
+                        "master_top_k": probability_entries(
+                            master_tokenizer, payload["master_probabilities"][index]
+                        ),
+                        "projected_auxiliary_top_k": probability_entries(
+                            master_tokenizer, payload["auxiliary_probabilities"][index]
+                        ),
+                        "fused_top_k": (
+                            probability_entries(master_tokenizer, fused_probabilities[index])
+                            if fused_probabilities is not None
+                            else None
+                        ),
+                    }
+                )
+            return
+
+        if event == "decision":
+            step = payload["step"]
+            print(f"\n[CTCA step {step[0]}.{step[1]} commit decisions]")
+            for index, position in enumerate(payload["active_positions"].tolist()):
+                selected = bool(payload["selected_mask"][index])
+                if selected:
+                    trace_stats["selected_count"] += 1
+                    token_id = int(payload["predicted_tokens"][index])
+                    print(
+                        f"  batch={position[0]} pos={position[1]} -> "
+                        f"{_decode_token(master_tokenizer, token_id)!r}, "
+                        f"rank={int(payload['selection_ranks'][index]) + 1}, "
+                        f"score={float(payload['scores'][index]):.6f}, "
+                        f"reason={payload['commit_reason']}"
+                    )
+                write_record(
+                    {
+                        "event": "commit_decision",
+                        "step": list(step),
+                        "batch_index": int(position[0]),
+                        "absolute_position": int(position[1]),
+                        "predicted_token_id": int(payload["predicted_tokens"][index]),
+                        "predicted_token": _decode_token(
+                            master_tokenizer, int(payload["predicted_tokens"][index])
+                        ),
+                        "selected": selected,
+                        "selection_rank": int(payload["selection_ranks"][index]) + 1,
+                        "selection_score": float(payload["scores"][index]),
+                        "selection_score_name": payload["selection_score_name"],
+                        "scheduled_transfer_count": int(
+                            payload["scheduled_transfer_counts"][position[0]]
+                        ),
+                        "commit_reason": payload["commit_reason"],
+                    }
+                )
+            return
+
+        if event == "summary":
+            candidate_count = trace_stats["candidate_count"]
+            print("\n[CTCA trace summary]")
+            print("  candidates evaluated:", candidate_count)
+            print("  tokens committed:", trace_stats["selected_count"])
+            if candidate_count:
+                print(
+                    "  mean Jensen-Shannon divergence:",
+                    f"{trace_stats['jensen_shannon_total'] / candidate_count:.6f}",
+                )
+                print(
+                    "  mean agreement:",
+                    f"{trace_stats['agreement_total'] / candidate_count:.6f}",
+                )
+            print("  projection route: relative_anchor_only")
+            print(
+                "  CTCA sample elapsed seconds:",
+                f"{payload['sample_elapsed_seconds']:.4f}",
+            )
+            write_record(
+                {
+                    "event": "run_summary",
+                    "master_id": payload["master_id"],
+                    "auxiliary_id": payload["auxiliary_id"],
+                    "projection_mode": payload["projection_mode"],
+                    "num_blocks": payload["num_blocks"],
+                    "steps_per_block": payload["steps_per_block"],
+                    "candidate_count": candidate_count,
+                    "selected_count": trace_stats["selected_count"],
+                    "mean_jensen_shannon_divergence": (
+                        trace_stats["jensen_shannon_total"] / candidate_count
+                        if candidate_count
+                        else None
+                    ),
+                    "mean_agreement": (
+                        trace_stats["agreement_total"] / candidate_count
+                        if candidate_count
+                        else None
+                    ),
+                    "projection_route": "relative_anchor_only",
+                    "sample_elapsed_seconds": payload["sample_elapsed_seconds"],
+                }
+            )
+            if jsonl_handle is not None:
+                jsonl_handle.close()
 
     return log
 
 
 def main() -> None:
+    smoke_start_time = time.perf_counter()
     args = parse_args()
     print_import_summary()
     from dllm.pipelines.tse import TSEConfig, TSESampler
@@ -455,6 +807,8 @@ def main() -> None:
             tokenizer,
             auxiliary_tokenizer,
             args.trace_top_k,
+            args.trace_jsonl,
+            args.trace_tensors,
         )
     generated = sampler.sample(
         [prompt_ids],
@@ -474,6 +828,8 @@ def main() -> None:
         weighting_mode=args.weighting_mode,
         weight_temperature=args.weight_temperature,
     )
+    synchronize_cuda_devices()
+    smoke_elapsed_seconds = time.perf_counter() - smoke_start_time
 
     print("Baseline commit model:", args.baseline_model)
     print("Selection mode:", args.selection_mode)
@@ -488,6 +844,12 @@ def main() -> None:
             print_top_predictions(tokenizer, paired_logits, args.top_k)
     print("\nDecoded canvas:")
     print(tokenizer.decode(generated[0].tolist(), skip_special_tokens=False))
+    if args.ctca:
+        print(
+            "CTCA sample elapsed seconds:",
+            f"{sampler.last_sample_elapsed_seconds:.4f}",
+        )
+    print("End-to-end smoke elapsed seconds:", f"{smoke_elapsed_seconds:.4f}")
 
 
 if __name__ == "__main__":

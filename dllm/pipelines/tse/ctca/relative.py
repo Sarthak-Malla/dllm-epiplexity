@@ -148,12 +148,11 @@ def build_sparse_topk_relative_anchor_projection(
     with timer("ctca.relative.sparse_topk_build"):
         for auxiliary_start in range(0, auxiliary_embeddings.shape[0], chunk_size):
             auxiliary_end = min(auxiliary_start + chunk_size, auxiliary_embeddings.shape[0])
-            with timer("ctca.relative.build_query_profiles"):
-                auxiliary_profiles = relative_anchor_profiles(
-                    auxiliary_embeddings[auxiliary_start:auxiliary_end],
-                    auxiliary_anchor_embeddings,
-                    temperature=anchor_temperature,
-                )
+            auxiliary_profiles = relative_anchor_profiles(
+                auxiliary_embeddings[auxiliary_start:auxiliary_end],
+                auxiliary_anchor_embeddings,
+                temperature=anchor_temperature,
+            )
             best_values = torch.full(
                 (auxiliary_profiles.shape[0], top_k),
                 -torch.inf,
@@ -241,12 +240,11 @@ def project_vocab_relative_exact(
     with timer("ctca.relative.exact_project"):
         for auxiliary_start in range(0, auxiliary_embeddings.shape[0], chunk_size):
             auxiliary_end = min(auxiliary_start + chunk_size, auxiliary_embeddings.shape[0])
-            with timer("ctca.relative.build_query_profiles"):
-                auxiliary_profiles = relative_anchor_profiles(
-                    auxiliary_embeddings[auxiliary_start:auxiliary_end],
-                    auxiliary_anchor_embeddings,
-                    temperature=anchor_temperature,
-                )
+            auxiliary_profiles = relative_anchor_profiles(
+                auxiliary_embeddings[auxiliary_start:auxiliary_end],
+                auxiliary_anchor_embeddings,
+                temperature=anchor_temperature,
+            )
             log_denominator = torch.full(
                 (auxiliary_profiles.shape[0],),
                 -torch.inf,

@@ -66,6 +66,27 @@ class FixedMaskedModel(torch.nn.Module):
         return SimpleNamespace(logits=logits)
 
 
+class PositionAwareDreamModel(FixedMaskedModel):
+    """Small Dream stand-in whose winning token exposes positional alignment."""
+
+    def __init__(self, vocab_size, hidden_size=3):
+        super().__init__(vocab_size, hidden_size)
+        self.config.model_type = "Dream"
+        self.last_position_ids = None
+
+    def forward(self, input_ids, attention_mask=None, position_ids=None):
+        self.last_position_ids = position_ids.detach().clone()
+        logits = torch.full(
+            (*input_ids.shape, self.config.vocab_size),
+            -8.0,
+            dtype=torch.float32,
+            device=input_ids.device,
+        )
+        for position in range(input_ids.shape[1]):
+            logits[:, position, position % self.config.vocab_size] = 8.0
+        return SimpleNamespace(logits=logits)
+
+
 def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
     master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
     auxiliary_tokenizer = CharacterTokenizer(
@@ -207,6 +228,131 @@ def test_ctca_sampler_ranks_positions_by_fused_top_probability(monkeypatch):
     )
     assert torch.equal(
         payload["consensus_scores"], torch.zeros_like(payload["scores"])
+    )
+
+
+def test_ctca_sampler_trace_exposes_forward_fusion_and_commit_decisions():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master_tokenizer.get_vocab()), hidden_size=2),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()), hidden_size=3),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+    events = []
+
+    sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+        trace_callback=lambda event, payload: events.append((event, payload)),
+    )
+
+    payloads = {event: payload for event, payload in events}
+    assert {"forward", "fusion", "decision", "summary"}.issubset(payloads)
+    forward = payloads["forward"]
+    assert forward["master_logit_adapter"] == "identity"
+    assert forward["auxiliary_logit_adapter"] == "identity"
+    assert torch.equal(
+        forward["master_logits_raw"], forward["master_logits_sampling"]
+    )
+    assert torch.equal(
+        forward["auxiliary_logits_raw"], forward["auxiliary_logits_sampling"]
+    )
+    assert forward["spatial_auxiliary_probabilities"].shape[0] == forward[
+        "active_positions"
+    ].shape[0]
+    fusion = payloads["fusion"]
+    assert fusion["jensen_shannon_divergence"].shape == fusion["scores"].shape
+    assert fusion["agreement_scores"].shape == fusion["scores"].shape
+    assert fusion["master_weights"].shape == fusion["scores"].shape
+    assert fusion["candidate_is_assigned"].all()
+    decision = payloads["decision"]
+    assert decision["selected_mask"].sum() == decision[
+        "scheduled_transfer_counts"
+    ].sum()
+    assert torch.all(decision["selection_ranks"] >= 0)
+    summary = payloads["summary"]
+    assert summary["sample_elapsed_seconds"] is not None
+    assert summary["sample_elapsed_seconds"] >= 0
+    assert sampler.last_sample_elapsed_seconds == summary["sample_elapsed_seconds"]
+
+
+def test_ctca_sampler_applies_dream_right_shift_in_either_role():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    sampler = CTCATSESampler(
+        PositionAwareDreamModel(len(master_tokenizer.get_vocab()), hidden_size=2),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()), hidden_size=3),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+    raw = torch.arange(2 * 4 * 3).reshape(2, 4, 3)
+
+    adapted = sampler._adapt_logits_for_sampling("a", raw)
+
+    assert sampler._logit_adapter_name("a") == "dream_right_shift"
+    assert sampler._logit_adapter_name("b") == "identity"
+    assert torch.equal(adapted[:, 0], raw[:, 0])
+    assert torch.equal(adapted[:, 1:], raw[:, :-1])
+    assert sampler._adapt_logits_for_sampling("b", raw) is raw
+
+
+def test_ctca_sampler_passes_native_dream_position_ids_for_padded_batches():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    dream = PositionAwareDreamModel(len(master_tokenizer.get_vocab()), hidden_size=2)
+    sampler = CTCATSESampler(
+        dream,
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()), hidden_size=3),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+    input_ids = torch.tensor([[0, 1, 2, 3], [0, 1, 3, 3]])
+    attention_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]])
+
+    sampler._forward_model("a", input_ids, attention_mask)
+
+    assert torch.equal(
+        dream.last_position_ids,
+        torch.tensor([[0, 1, 2, 3], [0, 1, 1, 1]]),
     )
 
 

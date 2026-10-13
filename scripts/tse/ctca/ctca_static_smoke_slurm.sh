@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ctca-static-smoke-test-relative-anchor-max-fuse
+#SBATCH --job-name=ctca-m0-one-question
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=01:20:00
@@ -25,6 +25,9 @@ fi
 source "${CONFIG_PATH}"
 
 ctca_canvas_workers="${ctca_canvas_workers:-8}"
+trace_top_k="${trace_top_k:-5}"
+trace_jsonl="${trace_jsonl:-.logs/ctca-m0-one-question_${SLURM_JOB_ID:-manual}.jsonl}"
+trace_tensors="${trace_tensors:-}"
 
 : "${model_a:?model_a is required}"
 : "${model_b:?model_b is required}"
@@ -55,8 +58,11 @@ ctca_canvas_workers="${ctca_canvas_workers:-8}"
 : "${ctca_num_anchors:?ctca_num_anchors is required}"
 : "${ctca_min_anchors:?ctca_min_anchors is required}"
 : "${ctca_canvas_workers:?ctca_canvas_workers is required}"
+: "${trace_top_k:?trace_top_k is required}"
+: "${trace_jsonl:?trace_jsonl is required}"
 : "${question:?question is required}"
 
+source ~/.zshrc 2>/dev/null || true
 source /apps/local/conda_init.sh
 conda activate dllm
 set -u
@@ -96,6 +102,9 @@ echo "ctca_projection_top_k=${ctca_projection_top_k}"
 echo "ctca_num_anchors=${ctca_num_anchors}"
 echo "ctca_min_anchors=${ctca_min_anchors}"
 echo "ctca_canvas_workers=${ctca_canvas_workers}"
+echo "trace_top_k=${trace_top_k}"
+echo "trace_jsonl=${trace_jsonl}"
+echo "trace_tensors=${trace_tensors}"
 echo "question=${question}"
 echo "================================="
 
@@ -112,6 +121,11 @@ export CTCA_CANVAS_WORKERS="${ctca_canvas_workers}"
 REBUILD_ARGS=()
 if [[ "${ctca_force_rebuild}" == "true" ]]; then
     REBUILD_ARGS+=(--ctca-force-rebuild)
+fi
+
+TRACE_TENSOR_ARGS=()
+if [[ -n "${trace_tensors}" ]]; then
+    TRACE_TENSOR_ARGS+=(--trace-tensors "${trace_tensors}")
 fi
 
 python scripts/tse/smoke.py \
@@ -143,5 +157,8 @@ python scripts/tse/smoke.py \
     --ctca-projection-top-k "${ctca_projection_top_k}" \
     --ctca-num-anchors "${ctca_num_anchors}" \
     --ctca-min-anchors "${ctca_min_anchors}" \
+    --trace-top-k "${trace_top_k}" \
+    --trace-jsonl "${trace_jsonl}" \
     --question "${question}" \
-    "${REBUILD_ARGS[@]}"
+    "${REBUILD_ARGS[@]}" \
+    "${TRACE_TENSOR_ARGS[@]}"

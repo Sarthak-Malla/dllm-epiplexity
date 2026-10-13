@@ -6,6 +6,7 @@ Run the CPU integration tests with:
 
 import math
 import os
+import time
 from concurrent.futures import Executor, ThreadPoolExecutor
 from collections.abc import Sequence
 from typing import Callable
@@ -71,10 +72,12 @@ class CTCATSESampler:
         self.auxiliary_device = torch.device(auxiliary_device)
         self.master_id = master_id
         self.auxiliary_id = auxiliary_id
+        self._projection_mode = projection_mode
         self.scheduler = LinearAlphaScheduler()
         self.last_aligned_probabilities: list[
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         ] = []
+        self.last_sample_elapsed_seconds: float | None = None
         self._valid_token_id_masks: dict[tuple[int, int, str], torch.Tensor] = {}
 
         master_embeddings = self.master_model.get_input_embeddings().weight.detach()
@@ -106,6 +109,52 @@ class CTCATSESampler:
         self.ctca_projection_diagnostics = self.aligner.projection_diagnostics(
             self._aligner_auxiliary_id
         )
+
+    def _logit_adapter_name(self, model_id: str) -> str:
+        """Return the sampling-logit adapter currently applied to a model."""
+        model = self._model_for_id(model_id)
+        if str(getattr(model.config, "model_type", "")).casefold() == "dream":
+            return "dream_right_shift"
+        return "identity"
+
+    def _model_for_id(self, model_id: str) -> torch.nn.Module:
+        """Return the model occupying a semantic CTCA role."""
+        if model_id == self.master_id:
+            return self.master_model
+        if model_id == self.auxiliary_id:
+            return self.auxiliary_model
+        raise ValueError(f"Unknown CTCA model ID: {model_id}")
+
+    def _adapt_logits_for_sampling(
+        self,
+        model_id: str,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Adapt model logits to CTCA's logical sampling positions.
+
+        Dream predicts the token at logical position ``i`` from the model output
+        at sequence position ``i - 1``. Its native sampler therefore shifts the
+        sequence dimension right before selecting masked positions. Other model
+        families retain identity alignment.
+        """
+        if self._logit_adapter_name(model_id) == "dream_right_shift":
+            return torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+        return logits
+
+    def _forward_model(
+        self,
+        model_id: str,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run one model with its native attention and position semantics."""
+        model = self._model_for_id(model_id)
+        kwargs = {"attention_mask": attention_mask}
+        if self._logit_adapter_name(model_id) == "dream_right_shift":
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            kwargs["position_ids"] = position_ids
+        return model(input_ids, **kwargs).logits
 
     def _valid_token_id_mask(
         self,
@@ -207,6 +256,14 @@ class CTCATSESampler:
             worker_count = min(batch_size, os.cpu_count() or 1, 8)
         return max(1, min(batch_size, worker_count))
 
+    def _synchronize_model_devices(self) -> None:
+        """Synchronize CTCA model devices before recording wall-clock durations."""
+        synchronized_devices: set[torch.device] = set()
+        for device in (self.master_device, self.auxiliary_device):
+            if device.type == "cuda" and device not in synchronized_devices:
+                torch.cuda.synchronize(device)
+                synchronized_devices.add(device)
+
     def _build_auxiliary_batch(
         self,
         canvas: torch.Tensor,
@@ -282,10 +339,14 @@ class CTCATSESampler:
         trace_step: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         with timer("ctca.forward.master"):
-            master_logits = self.master_model(
+            master_logits_raw = self._forward_model(
+                self.master_id,
                 canvas.to(self.master_device),
-                attention_mask=attention_mask.to(self.master_device),
-            ).logits
+                attention_mask.to(self.master_device),
+            )
+            master_logits = self._adapt_logits_for_sampling(
+                self.master_id, master_logits_raw
+            )
         with timer("ctca.forward.build_auxiliary_batch"):
             auxiliary_ids, auxiliary_mask, views = self._build_auxiliary_batch(
                 canvas,
@@ -296,10 +357,14 @@ class CTCATSESampler:
                 canvas_executor=canvas_executor,
             )
         with timer("ctca.forward.auxiliary"):
-            auxiliary_logits = self.auxiliary_model(
+            auxiliary_logits_raw = self._forward_model(
+                self.auxiliary_id,
                 auxiliary_ids,
-                attention_mask=auxiliary_mask,
-            ).logits
+                auxiliary_mask,
+            )
+            auxiliary_logits = self._adapt_logits_for_sampling(
+                self.auxiliary_id, auxiliary_logits_raw
+            )
 
         with timer("ctca.forward.master_probabilities"):
             active_mask = self._generation_mask(
@@ -369,11 +434,21 @@ class CTCATSESampler:
                     "canvas": canvas.detach().cpu(),
                     "prompt_lens": tuple(prompt_lens),
                     "active_positions": active_positions.detach().cpu(),
-                    "master_logits": master_logits.detach().cpu(),
-                    "auxiliary_logits": auxiliary_logits.detach().cpu(),
+                    "master_logits_raw": master_logits_raw.detach().cpu(),
+                    "master_logits_sampling": master_logits.detach().cpu(),
+                    "auxiliary_logits_raw": auxiliary_logits_raw.detach().cpu(),
+                    "auxiliary_logits_sampling": auxiliary_logits.detach().cpu(),
                     "active_mask": active_mask.detach().cpu(),
                     "views": views,
                     "master_offsets": master_offsets,
+                    "spatial_auxiliary_probabilities": (
+                        spatial_auxiliary.detach().cpu()
+                    ),
+                    "master_logit_adapter": self._logit_adapter_name(self.master_id),
+                    "auxiliary_logit_adapter": self._logit_adapter_name(
+                        self.auxiliary_id
+                    ),
+                    "projection_mode": self._projection_mode,
                 },
             )
         if master_probabilities.shape != projected_auxiliary.shape:
@@ -425,6 +500,9 @@ class CTCATSESampler:
                 "weighting_mode must be 'static', 'online_entropy', "
                 "or 'per_token_margin'"
             )
+
+        self._synchronize_model_devices()
+        sample_start_time = time.perf_counter()
 
         with timer("ctca.sample.prepare_prompts"):
             prompts = [
@@ -608,6 +686,11 @@ class CTCATSESampler:
                             scores = torch.rand_like(scores)
 
                 if trace_callback is not None:
+                    candidate_is_assigned = self._valid_token_id_mask(
+                        self.master_tokenizer,
+                        master_probabilities.shape[-1],
+                        master_probabilities.device,
+                    )[predicted_tokens]
                     trace_callback(
                         "fusion",
                         {
@@ -617,6 +700,16 @@ class CTCATSESampler:
                             "scores": scores.detach().cpu(),
                             "consensus_scores": (
                                 consensus.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                            "jensen_shannon_divergence": (
+                                divergence.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                            "agreement_scores": (
+                                agreement.detach().cpu()
                                 if selection_mode == "tse"
                                 else None
                             ),
@@ -634,6 +727,26 @@ class CTCATSESampler:
                                 if selection_mode == "tse"
                                 else None
                             ),
+                            "master_weights": (
+                                weighting.weights_a.detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                            "auxiliary_weights": (
+                                (1 - weighting.weights_a).detach().cpu()
+                                if selection_mode == "tse"
+                                else None
+                            ),
+                            "selection_score_name": (
+                                "fused_top_probability"
+                                if selection_mode == "tse"
+                                else (
+                                    "random_remasking_score"
+                                    if remasking == "random"
+                                    else "baseline_probability"
+                                )
+                            ),
+                            "candidate_is_assigned": candidate_is_assigned.detach().cpu(),
                         },
                     )
 
@@ -663,7 +776,69 @@ class CTCATSESampler:
                         mask_index.nonzero(as_tuple=False),
                         transfer_counts[:, step_index],
                     )
+                    selection_ranks = torch.full(
+                        scores.shape,
+                        -1,
+                        dtype=torch.long,
+                        device=scores.device,
+                    )
+                    active_positions_for_scores = active_positions.to(scores.device)
+                    for sample_index in range(len(prompts)):
+                        sample_indices = torch.nonzero(
+                            active_positions_for_scores[:, 0] == sample_index,
+                            as_tuple=False,
+                        ).flatten()
+                        order = torch.argsort(
+                            scores[sample_indices], descending=True, stable=True
+                        )
+                        selection_ranks[sample_indices[order]] = torch.arange(
+                            order.numel(), device=scores.device
+                        )
+                    selected_mask = torch.zeros(
+                        scores.shape, dtype=torch.bool, device=scores.device
+                    )
+                    for selected_position in selected_positions.to(scores.device):
+                        selected_index = torch.nonzero(
+                            torch.all(
+                                active_positions_for_scores
+                                == selected_position.unsqueeze(0),
+                                dim=1,
+                            ),
+                            as_tuple=False,
+                        ).flatten()
+                        selected_mask[selected_index] = True
                     canvas = commit_tokens(canvas, selected_positions, selected_tokens)
+                if trace_callback is not None:
+                    trace_callback(
+                        "decision",
+                        {
+                            "step": (block_index, step_index),
+                            "active_positions": active_positions.detach().cpu(),
+                            "predicted_tokens": predicted_tokens.detach().cpu(),
+                            "scores": scores.detach().cpu(),
+                            "selection_ranks": selection_ranks.detach().cpu(),
+                            "selected_mask": selected_mask.detach().cpu(),
+                            "selected_positions": selected_positions.detach().cpu(),
+                            "selected_tokens": selected_tokens.detach().cpu(),
+                            "scheduled_transfer_counts": transfer_counts[
+                                :, step_index
+                            ].detach().cpu(),
+                            "selection_score_name": (
+                                "fused_top_probability"
+                                if selection_mode == "tse"
+                                else (
+                                    "random_remasking_score"
+                                    if remasking == "random"
+                                    else "baseline_probability"
+                                )
+                            ),
+                            "commit_reason": (
+                                "highest_fused_confidence"
+                                if selection_mode == "tse"
+                                else f"baseline_{baseline_model}"
+                            ),
+                        },
+                    )
                 if trace_callback is not None:
                     trace_callback(
                         "canvas",
@@ -680,5 +855,23 @@ class CTCATSESampler:
 
         if canvas_executor is not None:
             canvas_executor.shutdown(wait=True)
+
+        self._synchronize_model_devices()
+        self.last_sample_elapsed_seconds = time.perf_counter() - sample_start_time
+
+        if trace_callback is not None:
+            trace_callback(
+                "summary",
+                {
+                    "canvas": canvas.detach().cpu(),
+                    "prompt_lens": tuple(prompt_lens),
+                    "master_id": self.master_id,
+                    "auxiliary_id": self.auxiliary_id,
+                    "projection_mode": self._projection_mode,
+                    "num_blocks": num_blocks,
+                    "steps_per_block": steps_per_block,
+                    "sample_elapsed_seconds": self.last_sample_elapsed_seconds,
+                },
+            )
 
         return canvas

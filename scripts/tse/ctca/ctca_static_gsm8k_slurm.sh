@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ctca-gsm8k-static-check-projection-mode
+#SBATCH --job-name=ctca-gsm8k-static-temperature-fusion-only
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
