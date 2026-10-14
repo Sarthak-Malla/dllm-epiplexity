@@ -330,6 +330,10 @@ python examples/fastdllm/llada/sample.py --model_name_or_path "GSAI-ML/LLaDA-8B-
 ## Evaluation
 > Read [(optional) Evaluation setup](/README.md#optional-evaluation-setup) before running evaluation. 
 
+TSE and CTCA research runs, results, and the standard comparison protocol are
+tracked in
+[`/home/sarthak.malla/dllm-epiplexity/scripts/tse/EXPERIMENTS.md`](/home/sarthak.malla/dllm-epiplexity/scripts/tse/EXPERIMENTS.md).
+
 For example, to evaluate [`LLaDA-8B-Instruct`](https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct) on [`MMLU_Pro`](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) using 4 GPUs, run:
 ```shell
 accelerate launch --num_processes 4 \

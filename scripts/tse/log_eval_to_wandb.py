@@ -100,6 +100,11 @@ def main() -> None:
 
     run = wandb.init(**init_kwargs)
     metrics = flatten_numbers(result.get("results", result))
+    wall_time = result.get("total_evaluation_time_seconds")
+    if wall_time is not None:
+        wall_time_seconds = float(wall_time)
+        metrics["evaluation/wall_time_seconds"] = wall_time_seconds
+        metrics["evaluation/wall_time_hours"] = wall_time_seconds / 3600.0
     if metrics:
         run.log(metrics)
         for key, value in metrics.items():
