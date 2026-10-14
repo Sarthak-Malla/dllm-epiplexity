@@ -26,6 +26,10 @@ source "${CONFIG_PATH}"
 
 # Preserve existing configurations that do not specify an evaluation batch size.
 batch_size="${batch_size:-1}"
+progress_wandb="${progress_wandb:-false}"
+progress_wandb_project="${progress_wandb_project:-dllm-tse}"
+progress_wandb_entity="${progress_wandb_entity:-}"
+progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -47,10 +51,47 @@ batch_size="${batch_size:-1}"
 : "${remasking:?remasking is required}"
 : "${num_fewshot:?num_fewshot is required}"
 : "${batch_size:?batch_size is required}"
+: "${progress_wandb:?progress_wandb is required}"
+: "${progress_wandb_project:?progress_wandb_project is required}"
+: "${progress_wandb_log_interval:?progress_wandb_log_interval is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
 set -u
+
+echo "===== TSE GSM8K run config ====="
+echo "CONFIG_PATH=${CONFIG_PATH}"
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
+echo "SLURM_JOB_NAME=${SLURM_JOB_NAME:-}"
+echo "HOSTNAME=$(hostname)"
+echo "DATE=$(date --iso-8601=seconds)"
+echo "experiment_name=${experiment_name}"
+echo "wandb_run_name=${wandb_run_name:-}"
+echo "model_a=${model_a}"
+echo "model_b=${model_b}"
+echo "model_a_device=${model_a_device}"
+echo "model_b_device=${model_b_device}"
+echo "fusion_device=${fusion_device}"
+echo "dtype=${dtype}"
+echo "max_new_tokens=${max_new_tokens}"
+echo "steps=${steps}"
+echo "block_size=${block_size}"
+echo "selection_mode=${selection_mode}"
+echo "weighting_mode=${weighting_mode}"
+echo "alpha=${alpha}"
+echo "temperature_a=${temperature_a}"
+echo "temperature_b=${temperature_b}"
+echo "weight_temperature=${weight_temperature}"
+echo "temperature=${temperature}"
+echo "remasking=${remasking}"
+echo "task=gsm8k_cot"
+echo "num_fewshot=${num_fewshot}"
+echo "batch_size=${batch_size}"
+echo "progress_wandb=${progress_wandb}"
+echo "progress_wandb_project=${progress_wandb_project}"
+echo "progress_wandb_entity=${progress_wandb_entity}"
+echo "progress_wandb_log_interval=${progress_wandb_log_interval}"
+echo "================================="
 
 srun nvidia-smi
 
@@ -66,6 +107,13 @@ RESULT_PATH=".logs/tse_gsm8k_${experiment_name}_${SLURM_JOB_ID}.json"
 RUN_NAME="${wandb_run_name:-tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}}"
 
 MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking}"
+MODEL_ARGS="${MODEL_ARGS},progress_wandb=${progress_wandb},progress_wandb_project=${progress_wandb_project},progress_wandb_run_name=${RUN_NAME}-progress,progress_wandb_log_interval=${progress_wandb_log_interval}"
+if [[ -n "${progress_wandb_entity}" ]]; then
+    MODEL_ARGS="${MODEL_ARGS},progress_wandb_entity=${progress_wandb_entity}"
+fi
+echo "RESULT_PATH=${RESULT_PATH}"
+echo "RUN_NAME=${RUN_NAME}"
+echo "MODEL_ARGS=${MODEL_ARGS}"
 
 accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
     --tasks gsm8k_cot \
