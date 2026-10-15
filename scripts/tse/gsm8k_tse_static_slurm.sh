@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54,gpu-51
+#SBATCH --exclude=gpu-55,gpu-51,gpu-52
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -16,12 +16,15 @@ set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
+source scripts/tse/run_logging.sh
+tse_print_run_context "$0"
 
 CONFIG_PATH="${1:-scripts/tse/configs/gsm8k_instruct_temperature_static.conf}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
     echo "Configuration file not found: ${CONFIG_PATH}" >&2
     exit 1
 fi
+tse_print_config_file "${CONFIG_PATH}"
 source "${CONFIG_PATH}"
 
 # Preserve existing configurations that do not specify an evaluation batch size.
@@ -30,6 +33,7 @@ progress_wandb="${progress_wandb:-false}"
 progress_wandb_project="${progress_wandb_project:-dllm-tse}"
 progress_wandb_entity="${progress_wandb_entity:-}"
 progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
+master_begin_suppress_tokens="${master_begin_suppress_tokens:-[]}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -54,6 +58,7 @@ progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 : "${progress_wandb:?progress_wandb is required}"
 : "${progress_wandb_project:?progress_wandb_project is required}"
 : "${progress_wandb_log_interval:?progress_wandb_log_interval is required}"
+: "${master_begin_suppress_tokens:?master_begin_suppress_tokens is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -84,6 +89,7 @@ echo "temperature_b=${temperature_b}"
 echo "weight_temperature=${weight_temperature}"
 echo "temperature=${temperature}"
 echo "remasking=${remasking}"
+echo "master_begin_suppress_tokens=${master_begin_suppress_tokens}"
 echo "task=gsm8k_cot"
 echo "num_fewshot=${num_fewshot}"
 echo "batch_size=${batch_size}"
@@ -106,7 +112,7 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 RESULT_PATH=".logs/tse_gsm8k_${experiment_name}_${SLURM_JOB_ID}.json"
 RUN_NAME="${wandb_run_name:-tse-gsm8k-${experiment_name}-${SLURM_JOB_ID}}"
 
-MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking}"
+MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},master_begin_suppress_tokens=${master_begin_suppress_tokens}"
 MODEL_ARGS="${MODEL_ARGS},progress_wandb=${progress_wandb},progress_wandb_project=${progress_wandb_project},progress_wandb_run_name=${RUN_NAME}-progress,progress_wandb_log_interval=${progress_wandb_log_interval}"
 if [[ -n "${progress_wandb_entity}" ]]; then
     MODEL_ARGS="${MODEL_ARGS},progress_wandb_entity=${progress_wandb_entity}"

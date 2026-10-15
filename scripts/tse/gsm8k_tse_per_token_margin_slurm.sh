@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54
+#SBATCH --exclude=gpu-05,gpu-54,gpu-55
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -16,6 +16,8 @@ set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
+source scripts/tse/run_logging.sh
+tse_print_run_context "$0"
 
 source /apps/local/conda_init.sh
 conda activate dllm

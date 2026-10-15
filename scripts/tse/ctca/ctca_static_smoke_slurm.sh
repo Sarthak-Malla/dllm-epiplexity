@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=01:20:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54,gpu-51
+#SBATCH --exclude=gpu-55,gpu-51,gpu-52
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -16,12 +16,15 @@ set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
+source scripts/tse/run_logging.sh
+tse_print_run_context "$0"
 
 CONFIG_PATH="${1:-scripts/tse/configs/ctca_static_smoke.conf}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
     echo "Configuration file not found: ${CONFIG_PATH}" >&2
     exit 1
 fi
+tse_print_config_file "${CONFIG_PATH}"
 source "${CONFIG_PATH}"
 
 ctca_canvas_workers="${ctca_canvas_workers:-8}"

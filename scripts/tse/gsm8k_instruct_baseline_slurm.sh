@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-05,gpu-54
+#SBATCH --exclude=gpu-05,gpu-54,gpu-55
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:1
@@ -16,12 +16,15 @@ set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
+source scripts/tse/run_logging.sh
+tse_print_run_context "$0"
 
 CONFIG_PATH="${1:-scripts/tse/configs/gsm8k_instruct_probability_temperature_02.conf}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
     echo "Configuration file not found: ${CONFIG_PATH}" >&2
     exit 1
 fi
+tse_print_config_file "${CONFIG_PATH}"
 source "${CONFIG_PATH}"
 
 : "${experiment_name:?experiment_name is required}"
