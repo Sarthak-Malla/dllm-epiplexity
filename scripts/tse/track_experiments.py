@@ -28,8 +28,30 @@ METRIC_STDERR = {
     SECONDARY_METRIC: "exact_match_stderr,strict-match",
 }
 PROTOCOL_REQUIREMENTS = {
-    "tse-gsm8k-v1": {"max_new_tokens": 512, "steps": 128},
-    "ctca-gsm8k-v1": {"max_new_tokens": 384, "steps": 64},
+    "tse-gsm8k-v1": {
+        "task": "gsm8k_cot",
+        "samples": 1319,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k-v1": {
+        "task": "gsm8k_cot",
+        "samples": 1319,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 384, "steps": 64},
+    },
+    "ctca-gsm8k300-v2": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-humaneval-v1": {
+        "task": "humaneval_instruct",
+        "samples": 164,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 768, "steps": 192},
+    },
 }
 REQUIRED_FIELDS = {
     "id",
@@ -89,16 +111,16 @@ def read_result(result_path: Path | None) -> dict[str, Any]:
 
 
 def read_metrics(result_path: Path | None) -> dict[str, float]:
-    """Read the standard GSM8K metrics and errors from an lm-eval result."""
+    """Read numeric metrics from a single-task lm-eval result."""
     payload = read_result(result_path)
     tasks = payload.get("results", {})
     if len(tasks) != 1:
         return {}
     task_metrics = next(iter(tasks.values()))
     return {
-        key: float(task_metrics[key])
-        for key in (*METRIC_STDERR, *METRIC_STDERR.values())
-        if key in task_metrics
+        key: float(value)
+        for key, value in task_metrics.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
 
 
@@ -143,33 +165,36 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
             )
         if result_path is not None:
             payload = read_result(result_path)
-            task = "gsm8k_cot"
-            effective_samples = (
-                payload.get("n-samples", {}).get(task, {}).get("effective")
-            )
-            if effective_samples != 1319:
-                errors.append(
-                    f"{label}: expected 1319 effective samples, got "
-                    f"{effective_samples!r}"
-                )
-            n_shot = payload.get("n-shot", {}).get(task)
-            if n_shot != 5:
-                errors.append(f"{label}: expected five-shot evaluation, got {n_shot!r}")
-            metadata = payload.get("configs", {}).get(task, {}).get("metadata", {})
             requirements = PROTOCOL_REQUIREMENTS.get(record["protocol_id"])
             if requirements is None:
                 errors.append(
                     f"{label}: protocol has no declared requirements: "
                     f"{record['protocol_id']}"
                 )
-            else:
-                for key, expected in requirements.items():
-                    actual = metadata.get(key)
-                    if actual != expected:
-                        errors.append(
-                            f"{label}: protocol requires {key}={expected!r}, "
-                            f"result has {actual!r}"
-                        )
+                continue
+            task = requirements["task"]
+            effective_samples = (
+                payload.get("n-samples", {}).get(task, {}).get("effective")
+            )
+            if effective_samples != requirements["samples"]:
+                errors.append(
+                    f"{label}: expected {requirements['samples']} effective samples, got "
+                    f"{effective_samples!r}"
+                )
+            n_shot = payload.get("n-shot", {}).get(task)
+            if n_shot != requirements["num_fewshot"]:
+                errors.append(
+                    f"{label}: expected {requirements['num_fewshot']}-shot "
+                    f"evaluation, got {n_shot!r}"
+                )
+            metadata = payload.get("configs", {}).get(task, {}).get("metadata", {})
+            for key, expected in requirements["metadata"].items():
+                actual = metadata.get(key)
+                if actual != expected:
+                    errors.append(
+                        f"{label}: protocol requires {key}={expected!r}, "
+                        f"result has {actual!r}"
+                    )
     return errors
 
 
@@ -188,17 +213,23 @@ def print_markdown(records: list[dict[str, Any]]) -> None:
     """Print a compact, copyable experiment status table."""
     print(
         "| Experiment | Group | Status | Protocol | "
-        "Flexible EM | Strict EM | Hours | Job |"
+        "Flexible EM | Strict EM | Pass@1 | Hours | Job |"
     )
-    print("|---|---|---|---|---|---:|---:|---|")
+    print("|---|---|---|---|---|---:|---:|---:|---|")
     for record in records:
         metrics = record["metrics"]
         duration = record["duration_hours"]
         formatted_duration = "—" if duration is None else f"{duration:.2f}"
+        pass_at_1 = next(
+            (value for key, value in metrics.items() if key.startswith("pass@1")),
+            None,
+        )
+        formatted_pass_at_1 = "—" if pass_at_1 is None else f"{100 * pass_at_1:.2f}"
         print(
             f"| {record['id']} | {record['group']} | {record['status']} | "
             f"{record['protocol_id']} | {format_score(metrics, PRIMARY_METRIC)} | "
             f"{format_score(metrics, SECONDARY_METRIC)} | "
+            f"{formatted_pass_at_1} | "
             f"{formatted_duration} | "
             f"{record.get('job_id') or '—'} |"
         )

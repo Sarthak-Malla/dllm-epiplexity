@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--run-name", required=True)
+    parser.add_argument("--group", default="")
     parser.add_argument("--mode", required=True)
     parser.add_argument("--weighting-mode", default="none")
     parser.add_argument("--model-a", default="")
@@ -97,6 +98,8 @@ def main() -> None:
     }
     if args.entity:
         init_kwargs["entity"] = args.entity
+    if args.group:
+        init_kwargs["group"] = args.group
 
     run = wandb.init(**init_kwargs)
     metrics = flatten_numbers(result.get("results", result))
@@ -110,6 +113,16 @@ def main() -> None:
         for key, value in metrics.items():
             run.summary[key] = value
     run.summary["result_path"] = str(result_path)
+    sample_paths = sorted(result_path.parent.glob("samples_*.jsonl"))
+    if sample_paths:
+        artifact = wandb.Artifact(
+            f"{args.run_name}-samples",
+            type="evaluation_samples",
+        )
+        for sample_path in sample_paths:
+            artifact.add_file(str(sample_path), name=sample_path.name)
+        run.log_artifact(artifact)
+        run.summary["sample_files"] = [str(path) for path in sample_paths]
     run.finish()
     print(f"Logged {len(metrics)} metrics to W&B run {args.run_name}")
 
