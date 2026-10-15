@@ -69,6 +69,8 @@ class DreamSamplerConfig(BaseSamplerConfig):
     stochastic_transfer: bool = False
     right_shift_logits: bool = True
     cfg_scale: float = 0.0
+    suppress_tokens: tuple[int, ...] = ()
+    begin_suppress_tokens: tuple[int, ...] = ()
 
 
 @dataclass
@@ -107,6 +109,10 @@ class DreamSampler(BaseSampler):
         return_dict = kwargs.get("return_dict", config.return_dict)
         right_shift_logits = kwargs.get("right_shift_logits", config.right_shift_logits)
         cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
+        suppress_tokens = kwargs.get("suppress_tokens", config.suppress_tokens)
+        begin_suppress_tokens = kwargs.get(
+            "begin_suppress_tokens", config.begin_suppress_tokens
+        )
 
         # --- Initialization ---
         mask_token_id = self.tokenizer.mask_token_id
@@ -185,6 +191,10 @@ class DreamSampler(BaseSampler):
 
             logits = generation_logits_hook_func(i, x, logits)
 
+            if suppress_tokens:
+                logits = logits.clone()
+                logits[..., list(suppress_tokens)] = -torch.inf
+
             mask_logits = logits[mask_index]
 
             if alg == "maskgit_plus":
@@ -214,6 +224,17 @@ class DreamSampler(BaseSampler):
                 x, -torch.inf, device=self.model.device, dtype=logits.dtype
             )
             full_confidence[mask_index] = confidence
+            if begin_suppress_tokens:
+                suppressed = torch.isin(
+                    x0,
+                    torch.as_tensor(
+                        begin_suppress_tokens,
+                        dtype=x0.dtype,
+                        device=x0.device,
+                    ),
+                )
+                confidence = confidence.masked_fill(suppressed, -torch.inf)
+                full_confidence[mask_index] = confidence
 
             for j in range(full_confidence.shape[0]):
                 number_transfer_tokens = num_transfer_tokens_list[j, i]

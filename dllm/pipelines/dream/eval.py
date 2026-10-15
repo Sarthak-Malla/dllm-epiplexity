@@ -25,6 +25,26 @@ from dllm.pipelines.dream import DreamSampler, DreamSamplerConfig
 eval_logger = logging.getLogger(__name__)
 
 
+def _parse_token_ids(value) -> tuple[int, ...]:
+    """Parse lm-eval's semicolon-delimited token-ID list syntax."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        if not value:
+            return ()
+        return tuple(
+            int(token_id.strip())
+            for token_id in value.split(";")
+            if token_id.strip()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(int(token_id) for token_id in value)
+    raise TypeError("suppression tokens must be a token-ID sequence")
+
+
 @dataclass
 class DreamEvalSamplerConfig(DreamSamplerConfig):
     """Default sampler config for Dream eval."""
@@ -61,6 +81,10 @@ class DreamEvalHarness(BaseEvalHarness):
     ) -> None:
         eval_config = eval_config or DreamEvalConfig()
         sampler_config = sampler_config or DreamEvalSamplerConfig()
+        for key in ("suppress_tokens", "begin_suppress_tokens"):
+            kwargs[key] = _parse_token_ids(
+                kwargs.get(key, getattr(sampler_config, key, ()))
+            )
 
         super().__init__(
             eval_config=eval_config,

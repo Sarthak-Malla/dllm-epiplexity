@@ -31,6 +31,8 @@ class TSEConfig:
     weighting_mode: str = "static"
     weight_temperature: float = 1.0
     normalize_entropy: bool = True
+    master_suppress_tokens: tuple[int, ...] = ()
+    master_begin_suppress_tokens: tuple[int, ...] = ()
     ctca_enabled: bool = False
     master_model: str = "a"
     ctca_cache_dir: str | None = ".cache/ctca"

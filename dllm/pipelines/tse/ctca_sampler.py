@@ -23,7 +23,12 @@ from dllm.pipelines.tse.ctca import (
 from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_divergence
 from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
-from dllm.pipelines.tse.selection import commit_tokens, select_positions
+from dllm.pipelines.tse.selection import (
+    commit_tokens,
+    select_positions,
+    suppress_master_commit_scores,
+    suppress_token_probabilities,
+)
 from dllm.pipelines.tse.weighting import (
     online_entropy_weights,
     per_token_margin_weights,
@@ -482,6 +487,8 @@ class CTCATSESampler:
         weighting_mode: str = "static",
         weight_temperature: float = 1.0,
         normalize_entropy: bool = True,
+        master_suppress_tokens: tuple[int, ...] | list[int] | None = None,
+        master_begin_suppress_tokens: tuple[int, ...] | list[int] | None = None,
         trace_callback: Callable[[str, dict], None] | None = None,
     ) -> torch.Tensor:
         """Generate on the master grid while projecting the auxiliary model."""
@@ -651,6 +658,10 @@ class CTCATSESampler:
                             auxiliary_probabilities,
                             weighting.weights_a,
                         )
+                        fused = suppress_token_probabilities(
+                            fused,
+                            master_suppress_tokens,
+                        )
                         divergence = jensen_shannon_divergence(
                             master_probabilities,
                             auxiliary_probabilities,
@@ -672,6 +683,10 @@ class CTCATSESampler:
                             if baseline_model == self.master_id
                             else auxiliary_probabilities
                         )
+                        selected_probabilities = suppress_token_probabilities(
+                            selected_probabilities,
+                            master_suppress_tokens,
+                        )
                         if temperature == 0:
                             predicted_tokens = selected_probabilities.argmax(dim=-1)
                         else:
@@ -684,6 +699,13 @@ class CTCATSESampler:
                         ).squeeze(-1)
                         if remasking == "random":
                             scores = torch.rand_like(scores)
+
+                    if selection_mode == "tse" or remasking == "low_confidence":
+                        scores = suppress_master_commit_scores(
+                            scores,
+                            predicted_tokens,
+                            master_begin_suppress_tokens,
+                        )
 
                 if trace_callback is not None:
                     candidate_is_assigned = self._valid_token_id_mask(
@@ -698,6 +720,9 @@ class CTCATSESampler:
                             "active_positions": active_positions.detach().cpu(),
                             "predicted_tokens": predicted_tokens.detach().cpu(),
                             "scores": scores.detach().cpu(),
+                            "master_begin_suppressed": torch.isneginf(
+                                scores
+                            ).detach().cpu(),
                             "consensus_scores": (
                                 consensus.detach().cpu()
                                 if selection_mode == "tse"

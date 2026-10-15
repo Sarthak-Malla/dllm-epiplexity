@@ -10,7 +10,12 @@ from dllm.core.schedulers import LinearAlphaScheduler
 from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_divergence
 from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
-from dllm.pipelines.tse.selection import commit_tokens, select_positions
+from dllm.pipelines.tse.selection import (
+    commit_tokens,
+    select_positions,
+    suppress_master_commit_scores,
+    suppress_token_probabilities,
+)
 from dllm.pipelines.tse.weighting import (
     online_entropy_weights,
     per_token_margin_weights,
@@ -90,6 +95,8 @@ class TSESampler:
         weighting_mode: str = "static",
         weight_temperature: float = 1.0,
         normalize_entropy: bool = True,
+        master_suppress_tokens: tuple[int, ...] | list[int] | None = None,
+        master_begin_suppress_tokens: tuple[int, ...] | list[int] | None = None,
     ) -> torch.Tensor:
         """Generate with paired forwards and baseline or TSE selection."""
         if not inputs:
@@ -202,6 +209,10 @@ class TSESampler:
                     fused = fuse_probabilities(
                         probabilities_a, probabilities_b, weighting.weights_a
                     )
+                    fused = suppress_token_probabilities(
+                        fused,
+                        master_suppress_tokens,
+                    )
                     divergence = jensen_shannon_divergence(
                         probabilities_a,
                         probabilities_b,
@@ -237,6 +248,9 @@ class TSESampler:
                         if baseline_model == "a"
                         else logits_b.to(self.model_a_device)
                     )
+                    if master_suppress_tokens:
+                        logits = logits.clone()
+                        logits[..., list(master_suppress_tokens)] = -torch.inf
                     x0 = torch.argmax(
                         add_gumbel_noise(logits, temperature=temperature), dim=-1
                     )
@@ -251,6 +265,13 @@ class TSESampler:
                         raise ValueError(
                             f"Unsupported remasking strategy: {remasking}"
                         )
+
+                if selection_mode == "tse" or remasking == "low_confidence":
+                    confidence = suppress_master_commit_scores(
+                        confidence,
+                        x0,
+                        master_begin_suppress_tokens,
+                    )
 
                 for sample_index, prompt_len in enumerate(prompt_lens):
                     confidence[

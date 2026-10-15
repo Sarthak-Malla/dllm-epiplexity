@@ -17,6 +17,7 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
+from dllm.core.eval.running_metrics import batch_running_accuracy
 from dllm.pipelines.tse.loader import load_tse_models
 from dllm.pipelines.tse.models import TSEConfig
 from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
@@ -31,6 +32,26 @@ def _as_bool(value) -> bool:
             return False
         raise ValueError(f"Invalid boolean model argument: {value}")
     return bool(value)
+
+
+def _parse_token_ids(value) -> tuple[int, ...]:
+    """Parse lm-eval's semicolon-delimited token-ID list syntax."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        if not value.strip():
+            return ()
+        return tuple(
+            int(token_id.strip())
+            for token_id in value.split(";")
+            if token_id.strip()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(int(token_id) for token_id in value)
+    raise TypeError("suppression tokens must be a token-ID sequence")
 
 
 @dataclass
@@ -63,6 +84,12 @@ class TSEEvalHarness(LM):
             weighting_mode=kwargs.get("weighting_mode", "static"),
             weight_temperature=float(kwargs.get("weight_temperature", 1.0)),
             normalize_entropy=_as_bool(kwargs.get("normalize_entropy", True)),
+            master_suppress_tokens=_parse_token_ids(
+                kwargs.get("master_suppress_tokens")
+            ),
+            master_begin_suppress_tokens=_parse_token_ids(
+                kwargs.get("master_begin_suppress_tokens")
+            ),
             ctca_enabled=_as_bool(kwargs.get("ctca_enabled", False)),
             master_model=kwargs.get("master_model", "a"),
             ctca_cache_dir=kwargs.get("ctca_cache_dir", ".cache/ctca"),
@@ -93,6 +120,7 @@ class TSEEvalHarness(LM):
         self._progress_wandb_run_name = kwargs.get(
             "progress_wandb_run_name", "tse-progress"
         )
+        self._progress_wandb_group = kwargs.get("progress_wandb_group")
         self._progress_wandb_log_interval = int(
             kwargs.get("progress_wandb_log_interval", 1)
         )
@@ -193,6 +221,10 @@ class TSEEvalHarness(LM):
             "max_new_tokens": self.config.max_new_tokens,
             "steps": self.config.steps,
             "block_size": self.config.block_size,
+            "master_suppress_tokens": list(self.config.master_suppress_tokens),
+            "master_begin_suppress_tokens": list(
+                self.config.master_begin_suppress_tokens
+            ),
             "ctca_enabled": self.config.ctca_enabled,
             "ctca_anchor_temperature": self.config.ctca_anchor_temperature,
             "ctca_projection_temperature": self.config.ctca_projection_temperature,
@@ -208,6 +240,8 @@ class TSEEvalHarness(LM):
         }
         if self._progress_wandb_entity:
             init_kwargs["entity"] = self._progress_wandb_entity
+        if self._progress_wandb_group:
+            init_kwargs["group"] = self._progress_wandb_group
         self._progress_wandb_run = wandb.init(**init_kwargs)
         atexit.register(self._finish_progress_wandb)
 
@@ -240,6 +274,8 @@ class TSEEvalHarness(LM):
     @torch.no_grad()
     def generate_until(self, requests: list[Instance]) -> list[str]:
         outputs = []
+        running_correct = 0.0
+        running_scored = 0
         request_count = len(requests)
         batch_starts = range(0, request_count, self.batch_size)
         total_batches = (request_count + self.batch_size - 1) // self.batch_size
@@ -288,6 +324,10 @@ class TSEEvalHarness(LM):
                 weighting_mode=self.config.weighting_mode,
                 weight_temperature=self.config.weight_temperature,
                 normalize_entropy=self.config.normalize_entropy,
+                master_suppress_tokens=self.config.master_suppress_tokens,
+                master_begin_suppress_tokens=(
+                    self.config.master_begin_suppress_tokens
+                ),
             )
             answers = self.tokenizer.batch_decode(generated, skip_special_tokens=False)
             answer_lengths = []
@@ -300,6 +340,14 @@ class TSEEvalHarness(LM):
                         answer = answer.split(stop_sequence)[0]
                 answer_lengths.append(len(answer))
                 outputs.append(answer)
+            batch_accuracy = batch_running_accuracy(
+                batch[0].task_name if batch else None,
+                [instance.doc for instance in batch],
+                outputs[-len(batch) :],
+            )
+            if batch_accuracy is not None:
+                running_correct += batch_accuracy * len(batch)
+                running_scored += len(batch)
             batch_seconds = time.perf_counter() - batch_start_time
             if self._progress_wandb_run is not None and (
                 batch_index % self._progress_wandb_log_interval == 0
@@ -311,8 +359,7 @@ class TSEEvalHarness(LM):
                 average_seconds = elapsed / max(examples_done, 1)
                 remaining = request_count - examples_done
                 eta_seconds = average_seconds * remaining
-                self._progress_wandb_run.log(
-                    {
+                progress_payload = {
                         "progress/examples_done": examples_done,
                         "progress/examples_total": request_count,
                         "progress/batches_done": batch_index,
@@ -331,9 +378,13 @@ class TSEEvalHarness(LM):
                             if answer_lengths
                             else 0.0
                         ),
-                    },
-                    step=batch_index,
-                )
+                }
+                if batch_accuracy is not None:
+                    progress_payload["quality/batch_accuracy"] = batch_accuracy
+                    progress_payload["quality/running_accuracy"] = (
+                        running_correct / running_scored
+                    )
+                self._progress_wandb_run.log(progress_payload, step=batch_index)
         return outputs
 
     def loglikelihood(self, requests):

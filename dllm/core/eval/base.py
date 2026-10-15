@@ -6,8 +6,11 @@ Pipeline-agnostic; no MDLM/Dream specifics.
 Run: Not runnable directly; use pipeline eval entrypoints (e.g. dllm.pipelines.llada.eval).
 """
 
+import atexit
 import dataclasses
 from dataclasses import dataclass
+import os
+import time
 
 import accelerate
 import torch
@@ -16,6 +19,7 @@ from lm_eval.api.model import LM
 from tqdm import tqdm
 
 import dllm
+from dllm.core.eval.running_metrics import batch_running_accuracy
 from dllm.core.samplers import BaseSampler, BaseSamplerConfig
 from dllm.utils.configs import ModelArguments
 
@@ -105,6 +109,62 @@ class BaseEvalHarness(LM):
             self.accelerator = None
 
         self.batch_size = int(kwargs.get("batch_size", eval_config.batch_size))
+        self._progress_wandb_enabled = self._as_bool(
+            kwargs.get("progress_wandb", False)
+        )
+        self._progress_wandb_project = kwargs.get(
+            "progress_wandb_project", os.environ.get("WANDB_PROJECT", "dllm-tse")
+        )
+        self._progress_wandb_entity = kwargs.get(
+            "progress_wandb_entity", os.environ.get("WANDB_ENTITY")
+        )
+        self._progress_wandb_run_name = kwargs.get(
+            "progress_wandb_run_name", "native-progress"
+        )
+        self._progress_wandb_group = kwargs.get("progress_wandb_group")
+        self._progress_wandb_log_interval = int(
+            kwargs.get("progress_wandb_log_interval", 1)
+        )
+        self._progress_wandb_run = None
+        if self._progress_wandb_enabled and self.rank == 0:
+            self._init_progress_wandb()
+
+    @staticmethod
+    def _as_bool(value) -> bool:
+        """Parse a permissive boolean model argument."""
+        if isinstance(value, str):
+            if value.casefold() in {"true", "1", "yes"}:
+                return True
+            if value.casefold() in {"false", "0", "no"}:
+                return False
+            raise ValueError(f"Invalid boolean model argument: {value}")
+        return bool(value)
+
+    def _init_progress_wandb(self) -> None:
+        """Open the lightweight batch-progress W&B run."""
+        import wandb
+
+        init_kwargs = {
+            "project": self._progress_wandb_project,
+            "name": self._progress_wandb_run_name,
+            "config": {
+                "model": self.model_args.model_name_or_path,
+                "batch_size": self.batch_size,
+                "sampler": dataclasses.asdict(self.sampler_config),
+            },
+        }
+        if self._progress_wandb_entity:
+            init_kwargs["entity"] = self._progress_wandb_entity
+        if self._progress_wandb_group:
+            init_kwargs["group"] = self._progress_wandb_group
+        self._progress_wandb_run = wandb.init(**init_kwargs)
+        atexit.register(self._finish_progress_wandb)
+
+    def _finish_progress_wandb(self) -> None:
+        """Close the progress run once, including during interpreter shutdown."""
+        if self._progress_wandb_run is not None:
+            self._progress_wandb_run.finish()
+            self._progress_wandb_run = None
 
     @property
     def rank(self) -> int:
@@ -136,10 +196,16 @@ class BaseEvalHarness(LM):
     @torch.no_grad()
     def generate_until(self, requests: list[Instance]) -> list[str]:
         out: list[str] = []
+        generation_start = time.perf_counter()
+        running_correct = 0.0
+        running_scored = 0
+        total_batches = (len(requests) + self.batch_size - 1) // self.batch_size
 
-        for batch_start in tqdm(
-            range(0, len(requests), self.batch_size), desc="Generating..."
+        for batch_index, batch_start in enumerate(
+            tqdm(range(0, len(requests), self.batch_size), desc="Generating..."),
+            start=1,
         ):
+            batch_timer = time.perf_counter()
             batch = requests[batch_start : batch_start + self.batch_size]
             contexts, gen_kwargs_list = zip(*[inst.args for inst in batch])
 
@@ -168,6 +234,41 @@ class BaseEvalHarness(LM):
                     if stop_seq in answer:
                         answer = answer.split(stop_seq)[0]
                 out.append(answer)
+
+            task_name = batch[0].task_name if batch else None
+            batch_accuracy = batch_running_accuracy(
+                task_name,
+                [instance.doc for instance in batch],
+                out[-len(batch) :],
+            )
+            if batch_accuracy is not None:
+                running_correct += batch_accuracy * len(batch)
+                running_scored += len(batch)
+            if self._progress_wandb_run is not None and (
+                batch_index % self._progress_wandb_log_interval == 0
+                or len(out) == len(requests)
+            ):
+                elapsed = time.perf_counter() - generation_start
+                batch_seconds = time.perf_counter() - batch_timer
+                payload = {
+                    "progress/examples_done": len(out),
+                    "progress/examples_total": len(requests),
+                    "progress/batches_done": batch_index,
+                    "progress/batches_total": total_batches,
+                    "progress/percent_done": len(out) / max(len(requests), 1),
+                    "throughput/batch_seconds": batch_seconds,
+                    "throughput/examples_per_second": len(batch)
+                    / max(batch_seconds, 1e-9),
+                    "throughput/eta_minutes": (
+                        elapsed / max(len(out), 1) * (len(requests) - len(out)) / 60
+                    ),
+                }
+                if batch_accuracy is not None:
+                    payload["quality/batch_accuracy"] = batch_accuracy
+                    payload["quality/running_accuracy"] = (
+                        running_correct / running_scored
+                    )
+                self._progress_wandb_run.log(payload, step=batch_index)
 
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()

@@ -3,6 +3,56 @@
 import torch
 
 
+def suppress_token_probabilities(
+    probabilities: torch.Tensor,
+    token_ids: tuple[int, ...] | list[int] | None,
+) -> torch.Tensor:
+    """Zero forbidden token probabilities and renormalize the distribution."""
+    if not token_ids:
+        return probabilities
+    if probabilities.ndim < 1:
+        raise ValueError("probabilities must have a vocabulary dimension")
+
+    suppressed_ids = torch.as_tensor(
+        token_ids,
+        dtype=torch.long,
+        device=probabilities.device,
+    )
+    if suppressed_ids.ndim != 1:
+        raise ValueError("token_ids must be one-dimensional")
+    if ((suppressed_ids < 0) | (suppressed_ids >= probabilities.shape[-1])).any():
+        raise ValueError("suppressed token ID exceeds the probability vocabulary")
+
+    updated = probabilities.clone()
+    updated.index_fill_(-1, suppressed_ids, 0.0)
+    normalizer = updated.sum(dim=-1, keepdim=True)
+    if (normalizer <= 0).any():
+        raise ValueError("suppression removed all probability mass")
+    return updated / normalizer
+
+
+def suppress_master_commit_scores(
+    scores: torch.Tensor,
+    predicted_tokens: torch.Tensor,
+    token_ids: tuple[int, ...] | list[int] | None,
+) -> torch.Tensor:
+    """Deprioritize selected master-token IDs without changing predictions."""
+    if scores.shape != predicted_tokens.shape:
+        raise ValueError("scores and predicted_tokens must have identical shapes")
+    if not token_ids:
+        return scores
+
+    suppressed_ids = torch.as_tensor(
+        token_ids,
+        dtype=predicted_tokens.dtype,
+        device=predicted_tokens.device,
+    )
+    if suppressed_ids.ndim != 1:
+        raise ValueError("token_ids must be one-dimensional")
+    suppressed = torch.isin(predicted_tokens, suppressed_ids)
+    return scores.masked_fill(suppressed.to(scores.device), -torch.inf)
+
+
 def select_positions(
     scores: torch.Tensor,
     predicted_tokens: torch.Tensor,

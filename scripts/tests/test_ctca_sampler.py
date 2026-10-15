@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import torch
 
 from dllm.pipelines.tse import ctca_sampler as ctca_sampler_module
+from dllm.pipelines.tse import sampler as sampler_module
 from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
 from dllm.pipelines.tse.sampler import TSESampler
 
@@ -260,6 +261,9 @@ def test_ctca_sampler_trace_exposes_forward_fusion_and_commit_decisions():
         steps=2,
         block_size=2,
         selection_mode="tse",
+        master_begin_suppress_tokens=list(
+            range(len(master_tokenizer.get_vocab()))
+        ),
         trace_callback=lambda event, payload: events.append((event, payload)),
     )
 
@@ -282,6 +286,8 @@ def test_ctca_sampler_trace_exposes_forward_fusion_and_commit_decisions():
     assert fusion["agreement_scores"].shape == fusion["scores"].shape
     assert fusion["master_weights"].shape == fusion["scores"].shape
     assert fusion["candidate_is_assigned"].all()
+    assert fusion["master_begin_suppressed"].all()
+    assert torch.isneginf(fusion["scores"]).all()
     decision = payloads["decision"]
     assert decision["selected_mask"].sum() == decision[
         "scheduled_transfer_counts"
@@ -595,10 +601,45 @@ def test_ctca_sampler_run_cache_matches_uncached_canvas_path(monkeypatch):
             assert cached_tensor.shape == uncached_tensor.shape
 
 
-def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():
+def test_homogeneous_sampler_applies_master_begin_suppression(monkeypatch):
     tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
     model_a = FixedMaskedModel(len(tokenizer.get_vocab()))
     model_b = FixedMaskedModel(len(tokenizer.get_vocab()))
+    sampler = TSESampler(model_a, model_b, tokenizer, "cpu", "cpu")
+    observed = []
+    original = sampler_module.suppress_master_commit_scores
+
+    def record_scores(scores, predicted_tokens, token_ids):
+        updated = original(scores, predicted_tokens, token_ids)
+        observed.append((predicted_tokens.detach().clone(), updated.detach().clone()))
+        return updated
+
+    monkeypatch.setattr(
+        sampler_module,
+        "suppress_master_commit_scores",
+        record_scores,
+    )
+
+    generated = sampler.sample(
+        [torch.tensor([0])],
+        max_new_tokens=2,
+        steps=2,
+        block_size=2,
+        selection_mode="tse",
+        master_begin_suppress_tokens=[0],
+    )
+
+    output = generated[0, 1:]
+    assert observed
+    assert torch.isneginf(observed[0][1][observed[0][0] == 0]).all()
+    assert output.tolist() == [0, 0]
+    assert not torch.any(output == tokenizer.mask_token_id)
+
+
+def test_homogeneous_sampler_never_predicts_always_suppressed_tokens():
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    model_a = FixedMaskedModel(len(tokenizer.get_vocab()), preferred_token_id=0)
+    model_b = FixedMaskedModel(len(tokenizer.get_vocab()), preferred_token_id=0)
     sampler = TSESampler(model_a, model_b, tokenizer, "cpu", "cpu")
 
     generated = sampler.sample(
@@ -607,8 +648,9 @@ def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():
         steps=2,
         block_size=2,
         selection_mode="tse",
+        master_suppress_tokens=[0],
     )
 
     output = generated[0, 1:]
-    assert output.tolist() == [0, 0]
+    assert not torch.any(output == 0)
     assert not torch.any(output == tokenizer.mask_token_id)

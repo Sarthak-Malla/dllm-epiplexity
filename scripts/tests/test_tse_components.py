@@ -10,7 +10,12 @@ from dllm.pipelines.tse.divergence import (
     jensen_shannon_divergence,
 )
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
-from dllm.pipelines.tse.selection import commit_tokens, select_positions
+from dllm.pipelines.tse.selection import (
+    commit_tokens,
+    select_positions,
+    suppress_master_commit_scores,
+    suppress_token_probabilities,
+)
 
 
 def test_identical_distributions_have_zero_jsd_and_full_agreement():
@@ -62,6 +67,45 @@ def test_select_positions_respects_per_batch_transfer_counts():
 
     assert torch.equal(selected_positions, torch.tensor([[0, 5], [1, 4]]))
     assert torch.equal(selected_tokens, torch.tensor([11, 12]))
+
+
+def test_begin_suppression_only_changes_master_commit_scores():
+    scores = torch.tensor([0.9, 0.8, 0.7])
+    predicted_tokens = torch.tensor([126081, 42, 126348])
+
+    updated = suppress_master_commit_scores(
+        scores,
+        predicted_tokens,
+        [126081, 126348],
+    )
+
+    assert torch.equal(predicted_tokens, torch.tensor([126081, 42, 126348]))
+    assert torch.equal(scores, torch.tensor([0.9, 0.8, 0.7]))
+    assert torch.isneginf(updated[[0, 2]]).all()
+    assert updated[1] == scores[1]
+
+
+def test_empty_begin_suppression_is_a_noop():
+    scores = torch.tensor([0.9, 0.8])
+
+    updated = suppress_master_commit_scores(scores, torch.tensor([1, 2]), ())
+
+    assert updated is scores
+
+
+def test_always_on_suppression_renormalizes_probabilities():
+    probabilities = torch.tensor([[0.7, 0.2, 0.1]])
+
+    updated = suppress_token_probabilities(probabilities, [0])
+
+    assert updated[0, 0] == 0
+    assert torch.allclose(updated.sum(dim=-1), torch.ones(1))
+    assert torch.allclose(updated[0, 1:], torch.tensor([2 / 3, 1 / 3]))
+
+
+def test_always_on_suppression_rejects_out_of_range_ids():
+    with pytest.raises(ValueError, match="exceeds"):
+        suppress_token_probabilities(torch.tensor([[0.5, 0.5]]), [2])
 
 
 def test_commit_tokens_only_updates_selected_positions():
