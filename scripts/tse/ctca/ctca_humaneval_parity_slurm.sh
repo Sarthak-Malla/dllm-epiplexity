@@ -2,7 +2,7 @@
 #SBATCH --job-name=ctca-humaneval-parity
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --exclude=gpu-55,gpu-51,gpu-52,gpu-05,gpu-02
 #SBATCH -p cscc-gpu-p

@@ -255,6 +255,68 @@ factor in this ablation.
 - Submission script:
   `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_llada_master_ablation_slurm.sh`.
 
+### Model-specific GSM8K prompting and temperature
+
+The study `ctca-native-prompt-temperature-20261018` tests Dream under the
+requested zero-shot MaskGIT+ configuration and then combines model-native prompt
+counts in LLaDA-master CTCA. The native Dream control uses `temperature=0.1`,
+`alg=maskgit_plus`, `alg_temp=0.0`, and zero shots while retaining the parity
+generation budget and full-vocabulary `top_p=1.0` calculation. Because positive
+Dream sampling temperature introduces categorical token sampling, this first run
+is a fixed-seed diagnostic; a paper result requires the predeclared repeated-seed
+policy for stochastic experiments.
+
+The two CTCA conditions use five demonstrations for LLaDA/model A and zero for
+Dream/model B. The launcher requests enough demonstrations from lm-eval for
+either model, then the CTCA eval layer independently selects each model's prompt
+prefix while preserving the same target question. Only the selected master's
+rendered prompt determines the sampler canvas, so these LLaDA-master runs have a
+five-shot canvas without constraining Dream's independent prompt count. LLaDA
+uses `temperature_a=1.0`; the paired
+control uses Dream `temperature_b=1.0`, while the calibration condition uses
+Dream `temperature_b=0.1`. All other settings are identical, including static
+`alpha=0.5` fusion and deterministic CTCA decoding.
+
+- Native Dream ID:
+  `ctca-gsm8k300-dream7bi-single-t0p1-maskgit-confrank-zeroshot-20261018`.
+- Native Dream protocol/config:
+  `ctca-gsm8k300-dream-maskgit-zero-v1`,
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/dream_gsm8k300_maskgit_t0p1_zeroshot.conf`.
+- Native Dream submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_controls_dream_native_alpha1_slurm.sh`.
+  This three-hour control bundle runs the short alpha-one equivalence validation
+  and the native Dream condition; the matched Dream control took 1.01 hours.
+- CTCA neutral-temperature control ID:
+  `ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-ens-t1p0-t1p0-w0p5-probmean-confrank-20261018`.
+- CTCA neutral-temperature config:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_llada5_dream0_t1p0.conf`.
+- CTCA Dream-temperature calibration ID:
+  `ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-ens-t1p0-t0p1-w0p5-probmean-confrank-20261018`.
+- CTCA protocol/calibration config:
+  `ctca-gsm8k300-model-prompt-v1`,
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_llada5_dream0_t0p1.conf`.
+- Standalone Dream-temperature-0.1 CTCA submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_llada5_dream0_temperature_slurm.sh`.
+  Its eight-hour limit is based on the 5.96-hour matched CTCA run. The neutral
+  temperature condition is paired with the earlier LLaDA-master run in the
+  prompt-suite launcher below.
+
+### Four-job launch plan
+
+The six pending experiments fit the four-job user limit as follows. Bundled
+launchers preserve the failure code but continue to their second experiment so
+one failed condition does not prevent the other from running.
+
+1. `ctca_controls_dream_native_alpha1_slurm.sh` (3 hours): alpha-one
+   equivalence plus native Dream MaskGIT+ at temperature 0.1.
+2. `ctca_humaneval_parity_slurm.sh` (12 hours): CTCA HumanEval parity. The
+   estimate scales the 5.96-hour GSM8K CTCA runtime by its larger
+   token-step workload and retains additional buffer.
+3. `ctca_gsm8k300_llada_master_prompt_suite_slurm.sh` (16 hours): LLaDA-master
+   five/five prompting followed by the five/zero neutral-temperature condition.
+4. `ctca_gsm8k300_llada5_dream0_temperature_slurm.sh` (8 hours): the five/zero
+   Dream-temperature-0.1 condition.
+
 ### `ctca-llada-master-equivalence-v1`
 
 This operational validation checks the static-fusion endpoint requested for the
