@@ -46,6 +46,18 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 5,
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-dream-maskgit-zero-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k300-model-prompt-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-humaneval-v1": {
         "task": "humaneval_instruct",
         "samples": 164,
