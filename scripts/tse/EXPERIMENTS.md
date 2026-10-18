@@ -238,6 +238,23 @@ to the other tokenizer's canvas. The native Dream and LLaDA controls, as well
 as CTCA, expose the same `suppress_tokens` and `begin_suppress_tokens` behavior
 used by this protocol.
 
+### `ctca-gsm8k300-master-ablation-v1`
+
+This protocol isolates output-master direction while retaining the locked
+`ctca-gsm8k300-v2` dataset, prompts, models, generation schedule, static
+probability mean, temperatures, projection, suppression policies, seeds, and
+batch size. It changes only `master_model` from Dream/model B to LLaDA/model A
+and moves `fusion_device` from `cuda:1` to the LLaDA-master device, `cuda:0`.
+EOS handling remains unchanged so that master direction is the only scientific
+factor in this ablation.
+
+- Required experiment ID:
+  - `ctca-gsm8k300-llada8bi-dream7bi-lladamaster-ens-t1p0-t1p0-w0p5-probmean-confrank-20261018`
+- Configuration:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_llada_master_ablation.conf`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_llada_master_ablation_slurm.sh`.
+
 ### Four-job execution layout
 
 - LLaDA controls: GSM8K-300 followed by HumanEval in
