@@ -255,6 +255,36 @@ factor in this ablation.
 - Submission script:
   `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_llada_master_ablation_slurm.sh`.
 
+### `ctca-llada-master-equivalence-v1`
+
+This operational validation checks the static-fusion endpoint requested for the
+LLaDA-master pipeline. It runs native LLaDA and normal CTCA TSE selection on the
+same LLaDA model instance and prompt, with `master_model=a`, `weighting_mode=static`,
+and `alpha=1.0`. The auxiliary Dream forward and CTCA projection remain active;
+this is deliberately an endpoint-correctness test, not an optimized single-model
+fast path.
+
+The check passes only when every post-commit canvas, the final token tensor, and
+the native-EOS-trimmed decoded text are identical. It also records native and CTCA
+wall times so the cost of retaining the inactive auxiliary branch is explicit.
+Because this is a one-prompt implementation validation rather than a benchmark
+quality result, it is not a scientific ledger entry.
+
+The smoke schedule is `max_new_tokens=64`, `steps=16`, and `block_size=32`.
+This exercises two generation blocks and repeated confidence-ranked commit
+decisions while remaining eight times shorter than the full 128-step run.
+
+- Validation ID:
+  `ctca-llada8bi-alpha1-nativeequiv-20261018`.
+- Configuration:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_llada_alpha1_native_equivalence.conf`.
+- Python runner:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/experiments/verify_llada_alpha1_native_equivalence.py`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_llada_alpha1_native_equivalence_slurm.sh`.
+- Result artifact:
+  `/home/sarthak.malla/dllm-epiplexity/.logs/ctca-llada-master-equivalence-v1/ctca-llada8bi-alpha1-nativeequiv-20261018/<job-id>/equivalence.json`.
+
 ### Four-job execution layout
 
 - LLaDA controls: GSM8K-300 followed by HumanEval in

@@ -82,6 +82,7 @@ class CTCATSESampler:
         self.last_aligned_probabilities: list[
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         ] = []
+        self.last_canvas_history: list[torch.Tensor] = []
         self.last_sample_elapsed_seconds: float | None = None
         self._valid_token_id_masks: dict[tuple[int, int, str], torch.Tensor] = {}
 
@@ -477,6 +478,7 @@ class CTCATSESampler:
         remasking: str = "low_confidence",
         stochastic_transfer: bool = False,
         capture_logits: bool = False,
+        capture_history: bool = False,
         baseline_model: str = "a",
         selection_mode: str = "tse",
         alpha: float = 0.5,
@@ -550,6 +552,9 @@ class CTCATSESampler:
                     sample_index, prompt_len : prompt_len + max_new_tokens
                 ] = self.master_tokenizer.mask_token_id
                 attention_mask[sample_index, : prompt_len + max_new_tokens] = 1
+        self.last_canvas_history = (
+            [canvas.detach().cpu().clone()] if capture_history else []
+        )
         if trace_callback is not None:
             trace_callback(
                 "canvas",
@@ -833,6 +838,10 @@ class CTCATSESampler:
                         ).flatten()
                         selected_mask[selected_index] = True
                     canvas = commit_tokens(canvas, selected_positions, selected_tokens)
+                    if capture_history:
+                        self.last_canvas_history.append(
+                            canvas.detach().cpu().clone()
+                        )
                 if trace_callback is not None:
                     trace_callback(
                         "decision",

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
+from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
 from dllm.pipelines.tse import ctca_sampler as ctca_sampler_module
 from dllm.pipelines.tse import sampler as sampler_module
 from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
@@ -18,6 +19,7 @@ class CharacterTokenizer:
         self.mask_token_id = self._vocab[mask_token]
         self.pad_token_id = self._vocab[pad_token]
         self.eos_token_id = self.pad_token_id
+        self.bos_token_id = 0
         self.unk_token_id = 0
         self.all_special_ids = [self.pad_token_id, self.mask_token_id]
 
@@ -56,6 +58,10 @@ class FixedMaskedModel(torch.nn.Module):
     def get_input_embeddings(self):
         return self.embeddings
 
+    @property
+    def device(self):
+        return self.embeddings.weight.device
+
     def forward(self, input_ids, attention_mask=None):
         logits = torch.zeros(
             *input_ids.shape,
@@ -86,6 +92,84 @@ class PositionAwareDreamModel(FixedMaskedModel):
         for position in range(input_ids.shape[1]):
             logits[:, position, position % self.config.vocab_size] = 8.0
         return SimpleNamespace(logits=logits)
+
+
+class PositionAwareMaskedModel(FixedMaskedModel):
+    """Small MDLM stand-in with unique confidence at each canvas position."""
+
+    def forward(self, input_ids, attention_mask=None):
+        logits = torch.zeros(
+            (*input_ids.shape, self.config.vocab_size),
+            dtype=torch.float32,
+            device=input_ids.device,
+        )
+        ordinary_vocab_size = self.config.vocab_size - 2
+        for position in range(input_ids.shape[1]):
+            preferred_token = position % ordinary_vocab_size
+            logits[:, position, preferred_token] = 1.0 + position
+        return SimpleNamespace(logits=logits)
+
+
+def test_ctca_alpha_one_matches_native_mdlm_trajectory():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(
+        ["a", "b", "c", "d"], "<mask>", "<pad>"
+    )
+    master_model = PositionAwareMaskedModel(len(master_tokenizer.get_vocab()))
+    auxiliary_model = FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()))
+
+    native = MDLMSampler(master_model, master_tokenizer).sample(
+        [torch.tensor([0])],
+        MDLMSamplerConfig(
+            max_new_tokens=4,
+            steps=4,
+            block_size=2,
+            temperature=0.0,
+            probability_temperature=1.0,
+            remasking="low_confidence",
+            stochastic_transfer=False,
+            cfg_scale=0.0,
+            return_dict=True,
+        ),
+    )
+    ctca_sampler = CTCATSESampler(
+        master_model,
+        auxiliary_model,
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        projection_temperature=0.5,
+        projection_chunk_size=2,
+        num_anchors=3,
+        min_anchors=3,
+    )
+    ctca = ctca_sampler.sample(
+        [torch.tensor([0])],
+        auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=4,
+        steps=4,
+        block_size=2,
+        temperature=0.0,
+        remasking="low_confidence",
+        stochastic_transfer=False,
+        capture_history=True,
+        selection_mode="tse",
+        weighting_mode="static",
+        alpha=1.0,
+        temperature_a=1.0,
+        temperature_b=1.0,
+    )
+
+    assert torch.equal(ctca, native.sequences)
+    assert len(ctca_sampler.last_canvas_history) == len(native.histories)
+    for ctca_canvas, native_canvas in zip(
+        ctca_sampler.last_canvas_history, native.histories
+    ):
+        assert torch.equal(ctca_canvas, native_canvas.cpu())
 
 
 def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
