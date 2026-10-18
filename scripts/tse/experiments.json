@@ -89,7 +89,7 @@
     },
     {
       "id": "ctca-gsm8k300-llada8bi-single-t1p0-nativeprob-confrank-20261015",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-parity-20261015",
       "method": "llada_confidence_control",
@@ -98,7 +98,7 @@
       "config_path": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/llada_gsm8k300_parity.conf",
       "submission_script": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/baseline/llada_parity_suite_slurm.sh",
       "job_bundle": "llada-parity-suite",
-      "job_id": null,
+      "job_id": "314694",
       "result_glob": "/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k300-v2/ctca-gsm8k300-llada8bi-single-t1p0-nativeprob-confrank-20261015/*/results_*.json",
       "samples_glob": "/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k300-v2/ctca-gsm8k300-llada8bi-single-t1p0-nativeprob-confrank-20261015/*/samples_*.jsonl",
       "response_cache": "/home/sarthak.malla/dllm-epiplexity/.cache/lm_eval_responses/ctca-gsm8k300-v2/ctca-gsm8k300-llada8bi-single-t1p0-nativeprob-confrank-20261015",
@@ -109,7 +109,22 @@
       "weighting": "single",
       "alpha": null,
       "probability_temperatures": [1.0],
-      "commit_score": "selected_token_probability"
+      "commit_score": "selected_token_probability",
+      "batch_size": 8,
+      "git_commit": "ebf9f6617cbec94c6dbf9e6cb0430add97aecc47",
+      "started_at": "2026-10-16",
+      "attempts": [
+        {
+          "job_id": "314637",
+          "status": "failed",
+          "reason": "CUDA initialization failed during preflight before evaluation"
+        },
+        {
+          "job_id": "314694",
+          "status": "completed"
+        }
+      ],
+      "notes": "Completed at batch_size=8; the default LLaDA parity suite now skips this finished GSM8K-300 control."
     },
     {
       "id": "ctca-gsm8k300-dream7bi-single-t1p0-nativeprob-confrank-20261015",
@@ -182,7 +197,21 @@
       "weighting": "single",
       "alpha": null,
       "probability_temperatures": [1.0],
-      "commit_score": "selected_token_probability"
+      "commit_score": "selected_token_probability",
+      "batch_size": 4,
+      "attempts": [
+        {
+          "job_id": "314637",
+          "status": "failed",
+          "reason": "CUDA initialization failed during preflight before evaluation"
+        },
+        {
+          "job_id": "314694",
+          "status": "failed",
+          "reason": "CUDA out of memory at batch_size=8 after 128 of 164 HumanEval examples"
+        }
+      ],
+      "notes": "Retry only HumanEval at batch_size=4; all other locked protocol settings are unchanged."
     },
     {
       "id": "ctca-humaneval-dream7bi-single-t1p0-nativeprob-confrank-20261015",

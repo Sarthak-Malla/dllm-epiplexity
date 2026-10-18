@@ -2,9 +2,9 @@
 #SBATCH --job-name=llada-parity-suite
 #SBATCH --output=.logs/%x_%j.out
 #SBATCH --error=.logs/%x_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-55,gpu-51,gpu-52
+#SBATCH --exclude=gpu-55,gpu-51,gpu-52,gpu-05
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:1
@@ -23,7 +23,7 @@ if (( $# > 0 )); then
     CONFIG_PATHS=("$@")
 else
     CONFIG_PATHS=(
-        "scripts/tse/configs/llada_gsm8k300_parity.conf"
+        # "scripts/tse/configs/llada_gsm8k300_parity.conf"  # Completed by job 314694.
         "scripts/tse/configs/llada_humaneval_parity.conf"
     )
 fi
