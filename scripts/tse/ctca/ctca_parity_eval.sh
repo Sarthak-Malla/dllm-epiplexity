@@ -31,6 +31,29 @@ source "${CONFIG_PATH}"
 : "${model_b_suppress_tokens:?model_b_suppress_tokens is required}"
 : "${model_b_begin_suppress_tokens:?model_b_begin_suppress_tokens is required}"
 
+# Ask lm-eval for a demonstration bank large enough for both prompts. Each
+# model independently selects its own prefix from that bank; only the rendered
+# master prompt determines the sampler's token canvas.
+case "${master_model}" in
+    a)
+        canvas_num_fewshot="${model_a_num_fewshot:-${num_fewshot}}"
+        ;;
+    b)
+        canvas_num_fewshot="${model_b_num_fewshot:-${num_fewshot}}"
+        ;;
+    *)
+        echo "master_model must be 'a' or 'b', got: ${master_model}" >&2
+        exit 1
+        ;;
+esac
+source_num_fewshot="${num_fewshot}"
+if [[ -n "${model_a_num_fewshot:-}" && ${model_a_num_fewshot} -gt ${source_num_fewshot} ]]; then
+    source_num_fewshot="${model_a_num_fewshot}"
+fi
+if [[ -n "${model_b_num_fewshot:-}" && ${model_b_num_fewshot} -gt ${source_num_fewshot} ]]; then
+    source_num_fewshot="${model_b_num_fewshot}"
+fi
+
 source ~/.zshrc 2>/dev/null || true
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -56,6 +79,12 @@ RUN_NAME="${experiment_name}-${ATTEMPT_ID}"
 mkdir -p "${RUN_DIR}" "$(dirname "${CACHE_PATH}")"
 
 MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},model_a_suppress_tokens=${model_a_suppress_tokens},model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens},model_b_suppress_tokens=${model_b_suppress_tokens},model_b_begin_suppress_tokens=${model_b_begin_suppress_tokens},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_anchor_temperature=${ctca_anchor_temperature},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
+if [[ -n "${model_a_num_fewshot:-}" ]]; then
+    MODEL_ARGS="${MODEL_ARGS},model_a_num_fewshot=${model_a_num_fewshot}"
+fi
+if [[ -n "${model_b_num_fewshot:-}" ]]; then
+    MODEL_ARGS="${MODEL_ARGS},model_b_num_fewshot=${model_b_num_fewshot}"
+fi
 MODEL_ARGS="${MODEL_ARGS},progress_wandb=${progress_wandb},progress_wandb_project=${progress_wandb_project},progress_wandb_group=${protocol_id},progress_wandb_run_name=${RUN_NAME}-progress,progress_wandb_log_interval=${progress_wandb_log_interval}"
 if [[ -n "${progress_wandb_entity}" ]]; then
     MODEL_ARGS="${MODEL_ARGS},progress_wandb_entity=${progress_wandb_entity}"
@@ -76,6 +105,10 @@ echo "protocol_id=${protocol_id}"
 echo "experiment_name=${experiment_name}"
 echo "task=${task}"
 echo "master_model=${master_model}"
+echo "source_num_fewshot=${source_num_fewshot}"
+echo "canvas_num_fewshot=${canvas_num_fewshot}"
+echo "model_a_num_fewshot=${model_a_num_fewshot:-inherited}"
+echo "model_b_num_fewshot=${model_b_num_fewshot:-inherited}"
 echo "model_a_suppress_tokens=${model_a_suppress_tokens}"
 echo "model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens}"
 echo "model_b_suppress_tokens=${model_b_suppress_tokens}"
@@ -88,7 +121,7 @@ echo "==========================="
 srun --ntasks=1 --nodes=1 accelerate launch --num_processes 1 \
     dllm/pipelines/tse/eval.py \
     --tasks "${task}" \
-    --num_fewshot "${num_fewshot}" \
+    --num_fewshot "${source_num_fewshot}" \
     --model tse_llada \
     --batch_size "${batch_size}" \
     --apply_chat_template \

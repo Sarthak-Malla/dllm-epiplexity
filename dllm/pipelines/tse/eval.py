@@ -54,6 +54,56 @@ def _parse_token_ids(value) -> tuple[int, ...]:
     raise TypeError("suppression tokens must be a token-ID sequence")
 
 
+def _parse_optional_nonnegative_int(value, name: str) -> int | None:
+    """Parse an optional non-negative integer model argument."""
+    if value is None or value == "":
+        return None
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return parsed
+
+
+def _select_fewshot_prefix(
+    chat_history: list[dict[str, str]],
+    num_fewshot: int | None,
+) -> list[dict[str, str]]:
+    """Select a prefix of rendered GSM8K demonstrations for one model.
+
+    lm-eval supplies GSM8K demonstrations and the target question in one user
+    message. The requested demonstrations are taken from the beginning of the
+    harness-selected sequence, preserving the final target question. Other chat
+    formats are left unchanged when they contain no demonstrations and zero are
+    requested.
+    """
+    copied = [dict(message) for message in chat_history]
+    if num_fewshot is None:
+        return copied
+    user_indices = [
+        index for index, message in enumerate(copied) if message.get("role") == "user"
+    ]
+    if len(user_indices) != 1:
+        raise ValueError(
+            "Per-model few-shot selection requires exactly one user chat message"
+        )
+    user_index = user_indices[0]
+    content = copied[user_index].get("content", "")
+    pieces = content.split("\n\nQ: ")
+    blocks = [pieces[0], *(f"Q: {piece}" for piece in pieces[1:])]
+    available_fewshots = max(len(blocks) - 1, 0)
+    if num_fewshot > available_fewshots:
+        raise ValueError(
+            f"Requested {num_fewshot} few-shot examples, but the rendered prompt "
+            f"contains {available_fewshots}"
+        )
+    if available_fewshots == 0:
+        return copied
+    copied[user_index]["content"] = "\n\n".join(
+        [*blocks[:num_fewshot], blocks[-1]]
+    )
+    return copied
+
+
 @dataclass
 class TSEEvalHarness(LM):
     """Run paired forwards with baseline or TSE selection."""
@@ -124,6 +174,12 @@ class TSEEvalHarness(LM):
         )
         self.selection_mode = kwargs.get("selection_mode", "tse")
         self.baseline_model = kwargs.get("baseline_model", "b")
+        self.model_a_num_fewshot = _parse_optional_nonnegative_int(
+            kwargs.get("model_a_num_fewshot"), "model_a_num_fewshot"
+        )
+        self.model_b_num_fewshot = _parse_optional_nonnegative_int(
+            kwargs.get("model_b_num_fewshot"), "model_b_num_fewshot"
+        )
         self._progress_wandb_enabled = _as_bool(
             kwargs.get("progress_wandb", False)
         )
@@ -234,6 +290,8 @@ class TSEEvalHarness(LM):
             "model_a": self.config.model_a_path,
             "model_b": self.config.model_b_path,
             "master_model": self.config.master_model,
+            "model_a_num_fewshot": self.model_a_num_fewshot,
+            "model_b_num_fewshot": self.model_b_num_fewshot,
             "batch_size": self.batch_size,
             "max_new_tokens": self.config.max_new_tokens,
             "steps": self.config.steps,
@@ -282,15 +340,24 @@ class TSEEvalHarness(LM):
         chat_history: list[dict[str, str]],
         add_generation_prompt: bool = True,
     ) -> str:
-        master_prompt = self.tokenizer.apply_chat_template(
+        master_history = _select_fewshot_prefix(
             chat_history,
+            getattr(self, f"model_{self.config.master_model}_num_fewshot"),
+        )
+        master_prompt = self.tokenizer.apply_chat_template(
+            master_history,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=not add_generation_prompt,
         )
         if self.auxiliary_tokenizer is not None:
-            auxiliary_prompt = self.auxiliary_tokenizer.apply_chat_template(
+            auxiliary_name = "b" if self.config.master_model == "a" else "a"
+            auxiliary_history = _select_fewshot_prefix(
                 chat_history,
+                getattr(self, f"model_{auxiliary_name}_num_fewshot"),
+            )
+            auxiliary_prompt = self.auxiliary_tokenizer.apply_chat_template(
+                auxiliary_history,
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
                 continue_final_message=not add_generation_prompt,
