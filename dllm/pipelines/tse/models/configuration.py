@@ -31,8 +31,10 @@ class TSEConfig:
     weighting_mode: str = "static"
     weight_temperature: float = 1.0
     normalize_entropy: bool = True
-    master_suppress_tokens: tuple[int, ...] = ()
-    master_begin_suppress_tokens: tuple[int, ...] = ()
+    model_a_suppress_tokens: tuple[int, ...] = ()
+    model_a_begin_suppress_tokens: tuple[int, ...] = ()
+    model_b_suppress_tokens: tuple[int, ...] = ()
+    model_b_begin_suppress_tokens: tuple[int, ...] = ()
     ctca_enabled: bool = False
     master_model: str = "a"
     ctca_cache_dir: str | None = ".cache/ctca"
@@ -44,3 +46,25 @@ class TSEConfig:
     ctca_projection_top_k: int = 64
     ctca_num_anchors: int | str = "auto"
     ctca_min_anchors: int = 128
+
+    def suppression_tokens_for(self, model_id: str) -> tuple[int, ...]:
+        """Return always-on suppression IDs owned by model ``a`` or ``b``."""
+        if model_id not in {"a", "b"}:
+            raise ValueError("model_id must be 'a' or 'b'")
+        return getattr(self, f"model_{model_id}_suppress_tokens")
+
+    def begin_suppression_tokens_for(self, model_id: str) -> tuple[int, ...]:
+        """Return begin-only suppression IDs owned by model ``a`` or ``b``."""
+        if model_id not in {"a", "b"}:
+            raise ValueError("model_id must be 'a' or 'b'")
+        return getattr(self, f"model_{model_id}_begin_suppress_tokens")
+
+    @property
+    def effective_suppress_tokens(self) -> tuple[int, ...]:
+        """Resolve always-on suppression from the selected master model."""
+        return self.suppression_tokens_for(self.master_model)
+
+    @property
+    def effective_begin_suppress_tokens(self) -> tuple[int, ...]:
+        """Resolve begin-only suppression from the selected master model."""
+        return self.begin_suppression_tokens_for(self.master_model)

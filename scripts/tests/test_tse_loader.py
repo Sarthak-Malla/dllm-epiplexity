@@ -133,6 +133,26 @@ def test_ctca_accepts_auto_num_anchors():
     _validate_config(config)
 
 
+def test_master_inherits_suppression_from_selected_model():
+    config = TSEConfig(
+        model_a_path="a",
+        model_b_path="b",
+        model_a_suppress_tokens=(11,),
+        model_a_begin_suppress_tokens=(12, 13),
+        model_b_suppress_tokens=(21,),
+        model_b_begin_suppress_tokens=(22, 23),
+        master_model="a",
+    )
+
+    assert config.effective_suppress_tokens == (11,)
+    assert config.effective_begin_suppress_tokens == (12, 13)
+
+    config.master_model = "b"
+
+    assert config.effective_suppress_tokens == (21,)
+    assert config.effective_begin_suppress_tokens == (22, 23)
+
+
 def test_ctca_rejects_invalid_anchor_temperature():
     config = TSEConfig(
         model_a_path="a",

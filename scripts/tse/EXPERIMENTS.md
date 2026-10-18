@@ -176,11 +176,10 @@ only after their immutable config files exist.
   | LLaDA | `[]` | `[126081;126348]` |
   | Dream | `[]` | `[151643;151645]` |
 
-  The pairs are the tokenizer-specific EOS and turn-end tokens. For CTCA, use
-  the row belonging to the master because the generated canvas is in the
-  master's vocabulary. The locked Dream-master run therefore uses
-  `master_suppress_tokens=[]` and
-  `master_begin_suppress_tokens=[151643;151645]`.
+  The pairs are the tokenizer-specific EOS and turn-end tokens. CTCA stores
+  both rows as model-owned settings (`model_a_*` for LLaDA and `model_b_*` for
+  Dream), then automatically applies the row belonging to `master_model`
+  because the generated canvas is in the master's vocabulary.
 - Required experiment IDs:
   - `ctca-gsm8k300-llada8bi-single-t1p0-nativeprob-confrank-20261015`
   - `ctca-gsm8k300-dream7bi-single-t1p0-nativeprob-confrank-20261015`
@@ -203,10 +202,8 @@ only after their immutable config files exist.
   | Dream | `[151643]` | `[]` |
 
   HumanEval always suppresses the tokenizer-specific EOS token so a premature
-  EOS prediction cannot terminate the code body. For CTCA, use the row belonging
-  to the master. The locked Dream-master run therefore uses
-  `master_suppress_tokens=[151643]` and
-  `master_begin_suppress_tokens=[]`.
+  EOS prediction cannot terminate the code body. CTCA stores both model-owned
+  rows and inherits the selected master's row automatically.
 - Primary metric: deterministic `pass@1` over all 164 problems.
 - Required experiment IDs:
   - `ctca-humaneval-llada8bi-single-t1p0-nativeprob-confrank-20261015`
@@ -228,9 +225,11 @@ only after their immutable config files exist.
 - Other settings: `selection_mode=tse`, `weighting_mode=static`,
   `normalize_entropy=true`, `epsilon=1e-9`, `capture_logits=false`, and
   `ctca_canvas_workers=16`.
-- Apply the task-specific Dream suppression list on the master grid. HumanEval
-  uses always-on `master_suppress_tokens=[151643]`; both always-on and
-  begin-only master suppression are implemented and covered by focused tests.
+- Define task-specific suppression independently for LLaDA/model A and
+  Dream/model B. The master grid inherits the selected model's suppression
+  policy; changing `master_model` therefore cannot leave the other tokenizer's
+  token IDs active. Both always-on and begin-only suppression are covered by
+  focused tests.
 
 The suppression IDs above are semantic equivalents, not interchangeable IDs:
 LLaDA EOS/turn-end/mask are `126081`/`126348`/`126336`, while Dream

@@ -62,6 +62,16 @@ class TSEEvalHarness(LM):
         super().__init__()
         if kwargs.get("model_a") is None or kwargs.get("model_b") is None:
             raise ValueError("TSE requires model_a and model_b model arguments")
+        legacy_suppression_args = {
+            "master_suppress_tokens",
+            "master_begin_suppress_tokens",
+        }.intersection(kwargs)
+        if legacy_suppression_args:
+            names = ", ".join(sorted(legacy_suppression_args))
+            raise ValueError(
+                f"{names} are no longer accepted; define suppression per model "
+                "with model_a_* and model_b_* arguments"
+            )
 
         self.config = TSEConfig(
             model_a_path=kwargs["model_a"],
@@ -84,11 +94,17 @@ class TSEEvalHarness(LM):
             weighting_mode=kwargs.get("weighting_mode", "static"),
             weight_temperature=float(kwargs.get("weight_temperature", 1.0)),
             normalize_entropy=_as_bool(kwargs.get("normalize_entropy", True)),
-            master_suppress_tokens=_parse_token_ids(
-                kwargs.get("master_suppress_tokens")
+            model_a_suppress_tokens=_parse_token_ids(
+                kwargs.get("model_a_suppress_tokens")
             ),
-            master_begin_suppress_tokens=_parse_token_ids(
-                kwargs.get("master_begin_suppress_tokens")
+            model_a_begin_suppress_tokens=_parse_token_ids(
+                kwargs.get("model_a_begin_suppress_tokens")
+            ),
+            model_b_suppress_tokens=_parse_token_ids(
+                kwargs.get("model_b_suppress_tokens")
+            ),
+            model_b_begin_suppress_tokens=_parse_token_ids(
+                kwargs.get("model_b_begin_suppress_tokens")
             ),
             ctca_enabled=_as_bool(kwargs.get("ctca_enabled", False)),
             master_model=kwargs.get("master_model", "a"),
@@ -217,13 +233,24 @@ class TSEEvalHarness(LM):
             "weighting_mode": self.config.weighting_mode,
             "model_a": self.config.model_a_path,
             "model_b": self.config.model_b_path,
+            "master_model": self.config.master_model,
             "batch_size": self.batch_size,
             "max_new_tokens": self.config.max_new_tokens,
             "steps": self.config.steps,
             "block_size": self.config.block_size,
-            "master_suppress_tokens": list(self.config.master_suppress_tokens),
-            "master_begin_suppress_tokens": list(
-                self.config.master_begin_suppress_tokens
+            "model_a_suppress_tokens": list(self.config.model_a_suppress_tokens),
+            "model_a_begin_suppress_tokens": list(
+                self.config.model_a_begin_suppress_tokens
+            ),
+            "model_b_suppress_tokens": list(self.config.model_b_suppress_tokens),
+            "model_b_begin_suppress_tokens": list(
+                self.config.model_b_begin_suppress_tokens
+            ),
+            "effective_suppress_tokens": list(
+                self.config.effective_suppress_tokens
+            ),
+            "effective_begin_suppress_tokens": list(
+                self.config.effective_begin_suppress_tokens
             ),
             "ctca_enabled": self.config.ctca_enabled,
             "ctca_anchor_temperature": self.config.ctca_anchor_temperature,
@@ -324,9 +351,9 @@ class TSEEvalHarness(LM):
                 weighting_mode=self.config.weighting_mode,
                 weight_temperature=self.config.weight_temperature,
                 normalize_entropy=self.config.normalize_entropy,
-                master_suppress_tokens=self.config.master_suppress_tokens,
+                master_suppress_tokens=self.config.effective_suppress_tokens,
                 master_begin_suppress_tokens=(
-                    self.config.master_begin_suppress_tokens
+                    self.config.effective_begin_suppress_tokens
                 ),
             )
             answers = self.tokenizer.batch_decode(generated, skip_special_tokens=False)

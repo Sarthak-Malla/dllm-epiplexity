@@ -4,7 +4,7 @@
 #SBATCH --error=.logs/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --exclude=gpu-55,gpu-51,gpu-52
+#SBATCH --exclude=gpu-55,gpu-51,gpu-52,gpu-05
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --gres=gpu:2
@@ -34,7 +34,10 @@ progress_wandb_project="${progress_wandb_project:-dllm-tse}"
 progress_wandb_entity="${progress_wandb_entity:-}"
 progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 ctca_canvas_workers="${ctca_canvas_workers:-8}"
-master_begin_suppress_tokens="${master_begin_suppress_tokens:-[]}"
+model_a_suppress_tokens="${model_a_suppress_tokens:-[]}"
+model_a_begin_suppress_tokens="${model_a_begin_suppress_tokens:-[]}"
+model_b_suppress_tokens="${model_b_suppress_tokens:-[]}"
+model_b_begin_suppress_tokens="${model_b_begin_suppress_tokens:-[]}"
 
 : "${experiment_name:?experiment_name is required}"
 : "${model_a:?model_a is required}"
@@ -76,7 +79,10 @@ master_begin_suppress_tokens="${master_begin_suppress_tokens:-[]}"
 : "${progress_wandb_project:?progress_wandb_project is required}"
 : "${progress_wandb_log_interval:?progress_wandb_log_interval is required}"
 : "${ctca_canvas_workers:?ctca_canvas_workers is required}"
-: "${master_begin_suppress_tokens:?master_begin_suppress_tokens is required}"
+: "${model_a_suppress_tokens:?model_a_suppress_tokens is required}"
+: "${model_a_begin_suppress_tokens:?model_a_begin_suppress_tokens is required}"
+: "${model_b_suppress_tokens:?model_b_suppress_tokens is required}"
+: "${model_b_begin_suppress_tokens:?model_b_begin_suppress_tokens is required}"
 
 source /apps/local/conda_init.sh
 conda activate dllm
@@ -92,7 +98,10 @@ echo "experiment_name=${experiment_name}"
 echo "model_a=${model_a}"
 echo "model_b=${model_b}"
 echo "master_model=${master_model}"
-echo "master_begin_suppress_tokens=${master_begin_suppress_tokens}"
+echo "model_a_suppress_tokens=${model_a_suppress_tokens}"
+echo "model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens}"
+echo "model_b_suppress_tokens=${model_b_suppress_tokens}"
+echo "model_b_begin_suppress_tokens=${model_b_begin_suppress_tokens}"
 echo "model_a_device=${model_a_device}"
 echo "model_b_device=${model_b_device}"
 echo "fusion_device=${fusion_device}"
@@ -146,7 +155,7 @@ export CTCA_CANVAS_WORKERS="${ctca_canvas_workers}"
 RESULT_PATH=".logs/ctca_${task}_${experiment_name}_${SLURM_JOB_ID}.json"
 RUN_NAME="ctca-${task}-${experiment_name}-${SLURM_JOB_ID}"
 
-MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},master_begin_suppress_tokens=${master_begin_suppress_tokens},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_anchor_temperature=${ctca_anchor_temperature},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
+MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},model_a_suppress_tokens=${model_a_suppress_tokens},model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens},model_b_suppress_tokens=${model_b_suppress_tokens},model_b_begin_suppress_tokens=${model_b_begin_suppress_tokens},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_anchor_temperature=${ctca_anchor_temperature},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
 MODEL_ARGS="${MODEL_ARGS},progress_wandb=${progress_wandb},progress_wandb_project=${progress_wandb_project},progress_wandb_run_name=${RUN_NAME}-progress,progress_wandb_log_interval=${progress_wandb_log_interval}"
 if [[ -n "${progress_wandb_entity}" ]]; then
     MODEL_ARGS="${MODEL_ARGS},progress_wandb_entity=${progress_wandb_entity}"
