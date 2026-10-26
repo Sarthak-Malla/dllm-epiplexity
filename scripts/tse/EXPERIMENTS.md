@@ -106,13 +106,44 @@ behavior of the run:
 <group>-<task>-<model>-<members>-<weighting>-<fusion>-<rank>-<YYYYMMDD>
 ```
 
-Use filesystem-safe decimal values such as `t0p2`, `t0p7`, and `w0p5`.
-Omit an axis only when it is fixed by the protocol and cannot distinguish two
-runs in the same study. In particular, record probability fusion and commit
-ranking separately: Jensen–Shannon agreement changes the position-ranking score,
-not the fused token distribution.
+Use filesystem-safe decimal values such as `st0p0`, `pt0p2`, and `w0p5`.
+For new IDs, `st` always means token sampling temperature (greedy at `st0p0`),
+and `pt` always means the temperature applied to logits before softmax for
+confidence, entropy, or fusion. In two-model runs, use `pta` and `ptb` for
+models A and B; for example, `pta0p2-ptb0p7`. Dream's native `temperature`
+controls both token sampling and its scoring softmax, so a native Dream run at
+0.1 is named `st0p1-pt0p1`. Native LLaDA exposes separate `temperature` and
+`probability_temperature` settings. CTCA's `temperature_a` and
+`temperature_b` are `pta` and `ptb`; its separate global `temperature` is
+the token sampling setting where used. TSE fusion selects its fused top token
+deterministically. Never use a bare `t` in a new ID.
 
-Examples for the TSE temperature study:
+Omit an axis only when it is fixed by the protocol and cannot distinguish two
+runs in the same study. Record both axes when the distinction matters, even
+when one implementation couples them. In particular, record probability
+fusion and commit ranking separately: Jensen–Shannon agreement changes the
+position-ranking score, not the fused token distribution.
+
+Examples under the new convention:
+
+```text
+ctca-gsm8k300-llada8bi-single-st0p0-pt1p0-nativeprob-entrank-fiveshot-20261019
+ctca-gsm8k300-dream7bi-single-st0p1-pt0p1-nativeprob-entrank-zeroshot-20261019
+tse-gsm8k-llada8bi-ens-st0p0-pta0p2-ptb0p7-w0p5-probmean-confrank-20261019
+```
+
+The earlier TSE temperature-study IDs below are legacy IDs. Their bare `t`
+means probability temperature, as their configs confirm. Keep historical IDs
+stable because result paths and W&B runs use them; consult the config rather
+than inferring a historical run's sampling temperature from `t`.
+
+The same ambiguity occurs in the existing CTCA records: job `314638` has
+`t1p0` in its native Dream ID but actually used sampling temperature `0.0`
+and an unscaled softmax; job `323687` has `t0p1` in its native Dream ID and
+used sampling temperature `0.1`; `t0p1` in the LLaDA-master CTCA calibration
+ID means Dream/model-B probability temperature `0.1`, with deterministic CTCA
+token selection. These IDs are retained as artifact identifiers, not examples
+of the new naming convention.
 
 ```text
 tse-gsm8k-llada8bi-single-t1p0-nativeconf-20260926
@@ -123,9 +154,11 @@ tse-gsm8k-llada8bi-ens-t0p2-t0p7-w0p5-probmean-confrank-20261013
 ```
 
 The ledger must also store the corresponding characteristics as structured
-fields: `study_id`, `fusion`, `weighting`, `alpha`, `probability_temperatures`,
-and `commit_score`. Names make runs recognizable; structured fields make them
-queryable and prevent ambiguous comparisons.
+fields: `study_id`, `fusion`, `weighting`, `alpha`,
+`token_sampling_temperature`, `probability_temperatures`, and `commit_score`.
+For CTCA, order `probability_temperatures` as model A then model B. Names make
+runs recognizable; structured fields make them queryable and prevent ambiguous
+comparisons.
 
 Use `<protocol-id>/<experiment-id>` as the W&B group/name prefix. Append the
 scheduler job ID only to an attempt name, never to the scientific experiment ID.
@@ -316,6 +349,109 @@ one failed condition does not prevent the other from running.
    five/five prompting followed by the five/zero neutral-temperature condition.
 4. `ctca_gsm8k300_llada5_dream0_temperature_slurm.sh` (8 hours): the five/zero
    Dream-temperature-0.1 condition.
+
+### `ctca-gsm8k32-dream-batch-v1`
+
+The study `ctca-dream-batch-diagnostic-20261026` checks whether Dream's poor
+GSM8K output in job `323687` depends on mixed-length batching. The diagnostic
+evaluates the first 32 examples from the same canonical `gsm8k_cot` test order.
+It retains the Instruct checkpoint, zero-shot chat prompt, `bfloat16`, 512
+generated tokens, 128 steps, sampling temperature 0.1, `top_p=1.0`, no top-k
+filter, `maskgit_plus`, `alg_temp=0.0`, right-shifted logits, suppression policy,
+and harness seed tuple from job `323687`. Only `batch_size` changes from 8 to 1.
+
+- ID: `ctca-gsm8k32-dream7bi-single-st0p1-pt0p1-nativeprob-confrank-b1-zeroshot-20261026`.
+- Config:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/dream_gsm8k32_maskgit_st0p1_pt0p1_batch1_zeroshot.conf`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/baseline/dream_gsm8k32_batch1_slurm.sh`.
+
+Compare the new samples by `doc_id` with the first 32 samples of job `323687`.
+Record flexible and strict exact match, empty-response count, and count of
+responses that reproduce a suffix of the question ending in `A:`. Sampling at
+temperature 0.1 means per-example text need not match across batch sizes. This
+32-example diagnostic must not replace the 300-example control or be used as a
+paper accuracy estimate. If the failure persists at batch size 1, inspect raw
+generated token IDs before `sample_trim` and compare Dream's native 256-token,
+256-step recipe separately.
+
+### `ctca-gsm8k32-dream-suppression-v1`
+
+The study `ctca-dream-suppression-diagnostic-20261026` isolates the
+`begin_suppress_tokens` setting from Dream job `323687` on its first 32 GSM8K
+questions. The new run keeps batch size 8, the same zero-shot chat prompts,
+checkpoint, 512/128 generation budget, `maskgit_plus`, sampling temperature
+0.1, `top_p=1.0`, no top-k filter, right-shifted logits, `bfloat16`, and seed
+tuple. It changes `begin_suppress_tokens` from `[151643;151645]` to `[]`.
+The always-on `suppress_tokens` list is `[]` in both runs.
+
+- ID: `ctca-gsm8k32-dream7bi-single-st0p1-pt0p1-nativeprob-confrank-b8-nosuppress-zeroshot-20261026`.
+- Config:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/dream_gsm8k32_maskgit_st0p1_pt0p1_batch8_nosuppress_zeroshot.conf`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/baseline/dream_gsm8k32_batch8_nosuppress_slurm.sh`.
+
+Compare by `doc_id` with the first 32 samples of job `323687`, recording both
+exact-match metrics, empty responses, and question-suffix responses. The two
+runs have the same batch composition, but token sampling at 0.1 remains
+stochastic. This diagnostic is not a paper accuracy estimate and does not
+isolate the other differences from the earlier full Dream entropy run.
+
+### `ctca-gsm8k300-entropy-v1`
+
+The study `ctca-entropy-comparison-20261019` pairs two native entropy-ranked
+GSM8K-300 controls with one entropy-ranked LLaDA-master CTCA ensemble. All three
+use the first 300 `gsm8k_cot` test questions, chat
+formatting, `bfloat16`, `max_new_tokens=512`, `steps=128`, batch size 8, the
+same seed tuple, and the model-specific suppression tokens from the locked
+parity controls. Native controls retain independent single-GPU execution.
+
+- Dream ID:
+  `ctca-gsm8k300-dream7bi-single-st0p1-pt0p1-nativeprob-entrank-zeroshot-20261019`.
+  Relative to job `323687`, only `alg` changes from `maskgit_plus` to `entropy`;
+  Dream still samples tokens at `temperature=0.1`, with `top_p=1.0`, no `top_k`,
+  and zero-shot prompting. Entropy is computed from the sharpened probability
+  distribution. This is a fixed-seed diagnostic; the stochastic paper result
+  requires at least three predeclared seeds.
+- LLaDA ID:
+  `ctca-gsm8k300-llada8bi-single-st0p0-pt1p0-nativeprob-entrank-fiveshot-20261019`.
+  It uses the official LLaDA sampling temperature `0.0`, an unscaled softmax
+  (`probability_temperature=1.0`), five-shot prompting, `block_size=32`, and
+  native greedy tokens. The new `remasking=entropy` policy ranks positions by
+  negative categorical entropy of the softmax, matching the position-score
+  definition in Dream's entropy policy. The official LLaDA generator supports
+  `low_confidence` and `random`, so this policy is a local extension rather
+  than an official LLaDA default.
+- Native configs:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/dream_gsm8k300_entropy_st0p1_pt0p1_zeroshot.conf`
+  and
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/llada_gsm8k300_entropy_fiveshot.conf`.
+- Single submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_native_entropy_controls_slurm.sh`.
+  It runs LLaDA then Dream in one eight-hour, one-GPU allocation and attempts
+  both even if the first evaluation fails.
+- CTCA ID:
+  `ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-ens-st0p0-pta1p0-ptb0p1-w0p5-probmean-entrank-20261019`.
+  This keeps the LLaDA-master five/zero prompt split, `alpha=0.5`, and
+  `temperature_a=1.0`, `temperature_b=0.1` from the existing CTCA
+  Dream-temperature calibration. Token proposals remain greedy. Only the
+  commit ranking changes: it selects lowest entropy of the fused probability
+  distribution instead of highest fused top-token confidence.
+- CTCA config and submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_llada5_dream0_entropy_ptb0p1.conf`
+  and
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_entropy_slurm.sh`.
+  The latter requests two GPUs for twelve hours.
+
+The LLaDA five-shot and Dream zero-shot prompts match the respective model
+inputs in the LLaDA-master CTCA five/zero conditions; the generation budgets
+and raw model probability temperatures also align. The new CTCA condition
+allows an entropy-ranking comparison against both native controls and a
+within-CTCA comparison against the existing confidence-ranked run. It does not
+perfectly isolate fusion against native Dream: Dream samples tokens at 0.1,
+whereas CTCA proposes the fused argmax deterministically. The shared protocol
+stays separate from the locked confidence-ranked parity and model-prompt
+protocols.
 
 ### `ctca-llada-master-equivalence-v1`
 

@@ -46,10 +46,34 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 5,
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-master-ablation-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-gsm8k300-dream-maskgit-zero-v1": {
         "task": "gsm8k_cot",
         "samples": 300,
         "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k32-dream-batch-v1": {
+        "task": "gsm8k_cot",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k32-dream-suppression-v1": {
+        "task": "gsm8k_cot",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k300-entropy-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": None,  # Each model has its CTCA-matched prompt count.
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
     "ctca-gsm8k300-model-prompt-v1": {
@@ -168,6 +192,10 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
             errors.append(f"{label}: invalid group {record['group']!r}")
         if not Path(record["config_path"]).is_file():
             errors.append(f"{label}: config does not exist: {record['config_path']}")
+        requirements = PROTOCOL_REQUIREMENTS.get(record["protocol_id"])
+        if requirements is not None and requirements["num_fewshot"] is None:
+            if "num_fewshot" not in record:
+                errors.append(f"{label}: protocol requires per-record num_fewshot")
         result_path = resolve_result(record)
         if record["status"] == "completed" and result_path is None:
             errors.append(f"{label}: completed experiment has no result artifact")
@@ -177,7 +205,6 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
             )
         if result_path is not None:
             payload = read_result(result_path)
-            requirements = PROTOCOL_REQUIREMENTS.get(record["protocol_id"])
             if requirements is None:
                 errors.append(
                     f"{label}: protocol has no declared requirements: "
@@ -194,9 +221,10 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
                     f"{effective_samples!r}"
                 )
             n_shot = payload.get("n-shot", {}).get(task)
-            if n_shot != requirements["num_fewshot"]:
+            expected_n_shot = record.get("num_fewshot", requirements["num_fewshot"])
+            if n_shot != expected_n_shot:
                 errors.append(
-                    f"{label}: expected {requirements['num_fewshot']}-shot "
+                    f"{label}: expected {expected_n_shot}-shot "
                     f"evaluation, got {n_shot!r}"
                 )
             metadata = payload.get("configs", {}).get(task, {}).get("metadata", {})
