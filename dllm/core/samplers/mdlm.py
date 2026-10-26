@@ -1,5 +1,7 @@
-"""
-reference: https://github.com/ML-GSAI/LLaDA/blob/main/generate.py
+"""Native masked-diffusion sampling, based on LLaDA's generate.py.
+
+Run focused sampler tests with:
+    pytest /home/sarthak.malla/dllm-epiplexity/scripts/tests/test_mdlm_entropy.py
 """
 
 import math
@@ -11,6 +13,13 @@ import torch.nn.functional as F
 
 from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
+
+
+def entropy_commit_scores(probabilities: torch.Tensor) -> torch.Tensor:
+    """Rank positions by negative categorical entropy, as Dream's entropy policy does."""
+    return torch.sum(
+        probabilities * torch.log(probabilities + 1e-10), dim=-1
+    )
 
 
 @dataclass
@@ -201,11 +210,14 @@ class MDLMSampler(BaseSampler):
                         logits[:, :, token_id] = -torch.inf
 
                 # Per-position confidence used to pick which masks to commit this step
-                if remasking == "low_confidence":
+                if remasking in {"low_confidence", "entropy"}:
                     p = F.softmax(logits.float() / probability_temperature, dim=-1)
-                    x0_p = torch.squeeze(
-                        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                    )  # [B, T] confidence of predicted token
+                    if remasking == "entropy":
+                        x0_p = entropy_commit_scores(p)
+                    else:
+                        x0_p = torch.squeeze(
+                            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
+                        )  # [B, T] confidence of predicted token
                 elif remasking == "random":
                     x0_p = torch.rand(
                         (x0.shape[0], x0.shape[1]), device=x0.device
@@ -264,6 +276,9 @@ class MDLMSampler(BaseSampler):
         steps = kwargs.get("steps", config.steps)
         block_size = kwargs.get("block_size", config.block_size)
         temperature = kwargs.get("temperature", config.temperature)
+        probability_temperature = kwargs.get(
+            "probability_temperature", config.probability_temperature
+        )
         cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
         cfg_keep_tokens = kwargs.get("cfg_keep_tokens", config.cfg_keep_tokens)
         remasking = kwargs.get("remasking", config.remasking)
@@ -276,6 +291,9 @@ class MDLMSampler(BaseSampler):
         begin_suppress_tokens = kwargs.get(
             "begin_suppress_tokens", config.begin_suppress_tokens
         )
+
+        if probability_temperature <= 0:
+            raise ValueError("probability_temperature must be positive")
 
         mask_id = self.tokenizer.mask_token_id
         bos_id = self.tokenizer.bos_token_id
@@ -395,6 +413,9 @@ class MDLMSampler(BaseSampler):
                     x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(
                         -1
                     )  # [B, T]
+                elif remasking == "entropy":
+                    p = F.softmax(logits.float() / probability_temperature, dim=-1)
+                    x0_p = entropy_commit_scores(p)
                 elif remasking == "random":
                     x0_p = torch.rand((B, T), device=self.model.device)
                 else:

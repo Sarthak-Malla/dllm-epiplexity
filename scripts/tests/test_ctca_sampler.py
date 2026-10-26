@@ -172,6 +172,63 @@ def test_ctca_alpha_one_matches_native_mdlm_trajectory():
         assert torch.equal(ctca_canvas, native_canvas.cpu())
 
 
+def test_ctca_entropy_ranks_fused_distributions_not_top_probability(monkeypatch):
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    distributions = torch.tensor(
+        [[0.60, 0.20, 0.20, 0.0, 0.0], [0.55, 0.45, 0.0, 0.0, 0.0]]
+    )
+
+    def first_decision(remasking):
+        sampler = CTCATSESampler(
+            FixedMaskedModel(len(tokenizer.get_vocab())),
+            FixedMaskedModel(len(tokenizer.get_vocab())),
+            tokenizer,
+            tokenizer,
+            "cpu",
+            "cpu",
+            master_id="a",
+            auxiliary_id="b",
+            cache_dir=None,
+            num_anchors=3,
+            min_anchors=3,
+        )
+
+        def aligned_probabilities(canvas, *_args, **_kwargs):
+            active_positions = (canvas == tokenizer.mask_token_id).nonzero(
+                as_tuple=False
+            )
+            probabilities = distributions[active_positions[:, 1] - 1]
+            return probabilities, probabilities, active_positions
+
+        monkeypatch.setattr(sampler, "_forward_aligned_probabilities", aligned_probabilities)
+        decisions = []
+        sampler.sample(
+            [torch.tensor([0])],
+            auxiliary_inputs=[torch.tensor([0])],
+            max_new_tokens=2,
+            steps=2,
+            block_size=2,
+            remasking=remasking,
+            selection_mode="tse",
+            weighting_mode="static",
+            alpha=0.5,
+            trace_callback=lambda event, payload: (
+                decisions.append(payload) if event == "decision" else None
+            ),
+        )
+        return decisions[0]
+
+    confidence = first_decision("low_confidence")
+    entropy_ranked = first_decision("entropy")
+
+    assert confidence["predicted_tokens"].tolist() == [0, 0]
+    assert entropy_ranked["predicted_tokens"].tolist() == [0, 0]
+    assert confidence["selected_positions"].tolist() == [[0, 1]]
+    assert entropy_ranked["selected_positions"].tolist() == [[0, 2]]
+    assert entropy_ranked["selection_score_name"] == "negative_fused_entropy"
+    assert entropy_ranked["commit_reason"] == "lowest_fused_entropy"
+
+
 def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
     master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
     auxiliary_tokenizer = CharacterTokenizer(

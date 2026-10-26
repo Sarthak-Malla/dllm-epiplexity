@@ -20,7 +20,11 @@ from dllm.pipelines.tse.ctca import (
     CrossTokenizerAligner,
     build_model_canvas_view,
 )
-from dllm.pipelines.tse.divergence import agreement_factor, jensen_shannon_divergence
+from dllm.pipelines.tse.divergence import (
+    agreement_factor,
+    entropy,
+    jensen_shannon_divergence,
+)
 from dllm.pipelines.tse.fusion import fuse_probabilities, logits_to_probabilities
 from dllm.pipelines.tse.scoring import consensus_scores, fused_confidence
 from dllm.pipelines.tse.selection import (
@@ -502,7 +506,7 @@ class CTCATSESampler:
             raise ValueError("baseline_model must be 'a' or 'b'")
         if selection_mode not in {"baseline", "tse"}:
             raise ValueError("selection_mode must be 'baseline' or 'tse'")
-        if remasking not in {"low_confidence", "random"}:
+        if remasking not in {"low_confidence", "random", "entropy"}:
             raise ValueError(f"Unsupported remasking strategy: {remasking}")
         if weighting_mode not in {"static", "online_entropy", "per_token_margin"}:
             raise ValueError(
@@ -678,10 +682,13 @@ class CTCATSESampler:
                         )
                         confidence, predicted_tokens = fused_confidence(fused)
                         consensus = consensus_scores(confidence, agreement)
-                        # Rank positions by their fused top-token probability. Keep
-                        # Jensen-Shannon agreement as a diagnostic rather than
-                        # allowing it to suppress high-confidence candidates.
-                        scores = confidence
+                        # Keep token proposals greedy; only the commit ranking
+                        # changes under the entropy policy.
+                        scores = (
+                            -entropy(fused, epsilon=1e-10)
+                            if remasking == "entropy"
+                            else confidence
+                        )
                     else:
                         selected_probabilities = (
                             master_probabilities
@@ -704,8 +711,12 @@ class CTCATSESampler:
                         ).squeeze(-1)
                         if remasking == "random":
                             scores = torch.rand_like(scores)
+                        elif remasking == "entropy":
+                            scores = -entropy(
+                                selected_probabilities, epsilon=1e-10
+                            )
 
-                    if selection_mode == "tse" or remasking == "low_confidence":
+                    if selection_mode == "tse" or remasking != "random":
                         scores = suppress_master_commit_scores(
                             scores,
                             predicted_tokens,
@@ -768,12 +779,20 @@ class CTCATSESampler:
                                 else None
                             ),
                             "selection_score_name": (
-                                "fused_top_probability"
+                                (
+                                    "negative_fused_entropy"
+                                    if remasking == "entropy"
+                                    else "fused_top_probability"
+                                )
                                 if selection_mode == "tse"
                                 else (
                                     "random_remasking_score"
                                     if remasking == "random"
-                                    else "baseline_probability"
+                                    else (
+                                        "negative_baseline_entropy"
+                                        if remasking == "entropy"
+                                        else "baseline_probability"
+                                    )
                                 )
                             ),
                             "candidate_is_assigned": candidate_is_assigned.detach().cpu(),
@@ -858,16 +877,28 @@ class CTCATSESampler:
                                 :, step_index
                             ].detach().cpu(),
                             "selection_score_name": (
-                                "fused_top_probability"
+                                (
+                                    "negative_fused_entropy"
+                                    if remasking == "entropy"
+                                    else "fused_top_probability"
+                                )
                                 if selection_mode == "tse"
                                 else (
                                     "random_remasking_score"
                                     if remasking == "random"
-                                    else "baseline_probability"
+                                    else (
+                                        "negative_baseline_entropy"
+                                        if remasking == "entropy"
+                                        else "baseline_probability"
+                                    )
                                 )
                             ),
                             "commit_reason": (
-                                "highest_fused_confidence"
+                                (
+                                    "lowest_fused_entropy"
+                                    if remasking == "entropy"
+                                    else "highest_fused_confidence"
+                                )
                                 if selection_mode == "tse"
                                 else f"baseline_{baseline_model}"
                             ),
