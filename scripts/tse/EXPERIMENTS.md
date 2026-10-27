@@ -375,6 +375,11 @@ paper accuracy estimate. If the failure persists at batch size 1, inspect raw
 generated token IDs before `sample_trim` and compare Dream's native 256-token,
 256-step recipe separately.
 
+Job `248059` completed on one NVIDIA RTX 5000 Ada GPU: 15/32 flexible EM
+(46.88% ± 8.96%), 3/32 strict EM (9.38% ± 5.24%), and 474 seconds of lm-eval
+time. The W&B summary and sample artifact are stored under the configured
+`.logs` path. No response is empty or repeats a question suffix ending in `A:`.
+
 ### `ctca-gsm8k32-dream-suppression-v1`
 
 The study `ctca-dream-suppression-diagnostic-20261026` isolates the
@@ -384,6 +389,13 @@ checkpoint, 512/128 generation budget, `maskgit_plus`, sampling temperature
 0.1, `top_p=1.0`, no top-k filter, right-shifted logits, `bfloat16`, and seed
 tuple. It changes `begin_suppress_tokens` from `[151643;151645]` to `[]`.
 The always-on `suppress_tokens` list is `[]` in both runs.
+
+Both pending 32-example Dream runs use the shared launcher with
+`--device cuda:0` passed to lm-eval, no duplicate `device` in `--model_args`,
+and no `--cache_requests` option. Response caching via `--use_cache` remains
+enabled. Jobs `323687` and `327581` used `device=cuda:0` in model arguments
+and `--cache_requests true`; their logs show all 300 requests were generated
+and results saved, so those options did not cause their low scores.
 
 - ID: `ctca-gsm8k32-dream7bi-single-st0p1-pt0p1-nativeprob-confrank-b8-nosuppress-zeroshot-20261026`.
 - Config:
@@ -396,6 +408,54 @@ exact-match metrics, empty responses, and question-suffix responses. The two
 runs have the same batch composition, but token sampling at 0.1 remains
 stochastic. This diagnostic is not a paper accuracy estimate and does not
 isolate the other differences from the earlier full Dream entropy run.
+
+Job `248066` completed on one NVIDIA RTX 5000 Ada GPU: 20/32 flexible EM
+(62.50% ± 8.70%), 0/32 strict EM, and 355 seconds of lm-eval time. The W&B
+summary and sample artifact are stored under the configured `.logs` path. No
+response is empty or repeats a question suffix ending in `A:`. The two new
+runs used the same 32 prompts and targets as job `323687`, whose first 32
+scored 2/32 flexible and 0/32 strict, with 20 question-suffix responses and
+five empty responses. Both new jobs ran on another cluster, so the comparison
+with job `323687` also changes the execution environment. The raw lm-eval
+result JSON files remain on that cluster; the ledger reads the downloaded
+W&B summaries until those files are copied over.
+
+### `ctca-gsm8k300-dream-suppression-v1`
+
+The study `ctca-dream-nosuppression-baseline-20261026` extends successful
+job `248066` from the first 32 to the first 300 canonical `gsm8k_cot` test
+questions. It keeps Dream-v0-Instruct-7B, zero-shot chat prompting, batch size
+8, 512 generated tokens, 128 steps, `maskgit_plus`, `temperature=0.1`,
+`top_p=1.0`, no `top_k`, `alg_temp=0.0`, `right_shift_logits=true`, and both
+suppression lists empty. The new experiment ID and response-cache path keep
+its requests separate from job `323687`.
+
+- ID: `ctca-gsm8k300-dream7bi-single-st0p1-pt0p1-nativeprob-confrank-b8-nosuppress-zeroshot-20261026`.
+- Config:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/dream_gsm8k300_maskgit_st0p1_pt0p1_batch8_nosuppress_zeroshot.conf`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/baseline/dream_gsm8k300_batch8_nosuppress_slurm.sh`.
+
+Job `248130` completed on one NVIDIA RTX 5000 Ada GPU. The downloaded W&B
+summary reports 170/300 flexible EM (56.67% ± 2.87%), 0/300 strict EM, and
+2,950 seconds of lm-eval time. Its first 32 prompts and responses exactly
+match job `248066`; across all 300 responses, none is empty or a repeated
+question suffix ending in `A:`. The remote run used the protocol group
+`ctca-gsm8k300-dream-suppression-v1`; the local config and ledger now use
+that group. The raw lm-eval result JSON remains on the other cluster.
+
+Dream's native `temperature=0.1` scales logits before softmax and samples
+candidate tokens from that distribution. For later LLaDA-master CTCA runs,
+keep `temperature_a=1.0`, set Dream `temperature_b=0.1`, leave global
+`temperature=0.0` for the current greedy fusion path, and use empty Dream
+suppression lists. With LLaDA as master, only LLaDA's begin-suppression list
+is applied to commit scores. With Dream as master, use an empty master
+begin-suppression list. The CTCA TSE path chooses fused tokens greedily even
+when Dream probabilities use temperature 0.1; this native stochastic baseline
+therefore does not isolate fusion alone. A later sampling-matched comparison
+needs a Dream control with greedy token proposals and 0.1 probability scaling,
+or a CTCA path that samples fused tokens.
+
 
 ### `ctca-gsm8k300-entropy-v1`
 

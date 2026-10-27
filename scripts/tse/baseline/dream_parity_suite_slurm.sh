@@ -72,7 +72,7 @@ for CONFIG_PATH in "${CONFIG_PATHS[@]}"; do
         RUN_NAME="${experiment_name}-${ATTEMPT_ID}"
         mkdir -p "${RUN_DIR}" "$(dirname "${CACHE_PATH}")"
 
-        MODEL_ARGS="pretrained=${model},device=${device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},temperature=${temperature},top_p=${top_p},alg=${alg},alg_temp=${alg_temp},stochastic_transfer=${stochastic_transfer},right_shift_logits=${right_shift_logits},cfg_scale=${cfg_scale},add_bos_token=${add_bos_token},suppress_tokens=${suppress_tokens},begin_suppress_tokens=${begin_suppress_tokens}"
+        MODEL_ARGS="pretrained=${model},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},temperature=${temperature},top_p=${top_p},alg=${alg},alg_temp=${alg_temp},stochastic_transfer=${stochastic_transfer},right_shift_logits=${right_shift_logits},cfg_scale=${cfg_scale},add_bos_token=${add_bos_token},suppress_tokens=${suppress_tokens},begin_suppress_tokens=${begin_suppress_tokens}"
         if [[ -n "${top_k}" ]]; then
             MODEL_ARGS="${MODEL_ARGS},top_k=${top_k}"
         fi
@@ -105,10 +105,10 @@ for CONFIG_PATH in "${CONFIG_PATHS[@]}"; do
             --tasks "${task}" \
             --num_fewshot "${num_fewshot}" \
             --model dream \
+            --device "${device}" \
             --batch_size "${batch_size}" \
             --apply_chat_template \
             --seed 0,1234,1234,1234 \
-            --cache_requests true \
             --use_cache "${CACHE_PATH}" \
             --log_samples \
             --output_path "${RESULT_PATH}" \

@@ -126,7 +126,6 @@ srun --ntasks=1 --nodes=1 accelerate launch --num_processes 1 \
     --batch_size "${batch_size}" \
     --apply_chat_template \
     --seed 0,1234,1234,1234 \
-    --cache_requests true \
     --use_cache "${CACHE_PATH}" \
     --log_samples \
     --output_path "${RESULT_PATH}" \

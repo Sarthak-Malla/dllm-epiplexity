@@ -58,6 +58,12 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 0,
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-dream-suppression-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-gsm8k32-dream-batch-v1": {
         "task": "gsm8k_cot",
         "samples": 32,
@@ -160,15 +166,47 @@ def read_metrics(result_path: Path | None) -> dict[str, float]:
     }
 
 
+def read_wandb_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Read a downloaded W&B summary when the remote lm-eval JSON is unavailable."""
+    summary_path = record.get("wandb_summary_path")
+    if not summary_path or not Path(summary_path).is_file():
+        return {}
+    with Path(summary_path).open(encoding="utf-8") as summary_file:
+        return json.load(summary_file)
+
+
+def read_wandb_metrics(summary: dict[str, Any], task: str) -> dict[str, float]:
+    """Extract task metrics from an unmodified W&B summary file."""
+    prefix = f"{task}/"
+    return {
+        key.removeprefix(prefix): float(value)
+        for key, value in summary.items()
+        if key.startswith(prefix)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    }
+
+
 def resolved_record(record: dict[str, Any]) -> dict[str, Any]:
     """Attach the resolved artifact and standard metrics to a ledger record."""
     result_path = resolve_result(record)
     payload = read_result(result_path)
-    duration = payload.get("total_evaluation_time_seconds")
+    summary = read_wandb_summary(record) if result_path is None else {}
+    task = PROTOCOL_REQUIREMENTS.get(record["protocol_id"], {}).get("task", "")
+    duration = payload.get("total_evaluation_time_seconds") or summary.get(
+        "evaluation/wall_time_seconds"
+    )
     return {
         **record,
         "resolved_result_path": str(result_path) if result_path else None,
-        "metrics": read_metrics(result_path),
+        "resolved_wandb_summary_path": (
+            record.get("wandb_summary_path") if summary else None
+        ),
+        "metrics": (
+            read_metrics(result_path)
+            if result_path
+            else read_wandb_metrics(summary, task)
+        ),
         "duration_hours": float(duration) / 3600.0 if duration else None,
     }
 
@@ -197,8 +235,16 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
             if "num_fewshot" not in record:
                 errors.append(f"{label}: protocol requires per-record num_fewshot")
         result_path = resolve_result(record)
+        summary = read_wandb_summary(record) if result_path is None else {}
         if record["status"] == "completed" and result_path is None:
-            errors.append(f"{label}: completed experiment has no result artifact")
+            if not summary:
+                errors.append(f"{label}: completed experiment has no result artifact")
+            elif not glob.glob(record.get("samples_glob", "")):
+                errors.append(f"{label}: W&B summary has no local sample artifact")
+            elif requirements is None:
+                errors.append(f"{label}: W&B summary has no declared protocol")
+            elif not read_wandb_metrics(summary, requirements["task"]):
+                errors.append(f"{label}: W&B summary has no task metrics")
         if result_path is not None and not read_metrics(result_path):
             errors.append(
                 f"{label}: result has no standard task metrics: {result_path}"
