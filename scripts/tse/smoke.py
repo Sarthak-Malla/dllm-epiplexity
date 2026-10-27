@@ -103,6 +103,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctca-projection-top-k", type=int, default=64)
     parser.add_argument("--ctca-num-anchors", default="auto")
     parser.add_argument("--ctca-min-anchors", type=int, default=128)
+    parser.add_argument(
+        "--master-suppress-tokens", type=int, nargs="*", default=None
+    )
+    parser.add_argument(
+        "--master-begin-suppress-tokens", type=int, nargs="*", default=None
+    )
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     return parser.parse_args()
 
@@ -827,6 +833,14 @@ def main() -> None:
         fusion_device=config.fusion_device,
         weighting_mode=args.weighting_mode,
         weight_temperature=args.weight_temperature,
+        **(
+            {
+                "master_suppress_tokens": args.master_suppress_tokens,
+                "master_begin_suppress_tokens": args.master_begin_suppress_tokens,
+            }
+            if args.ctca
+            else {}
+        ),
     )
     synchronize_cuda_devices()
     smoke_elapsed_seconds = time.perf_counter() - smoke_start_time

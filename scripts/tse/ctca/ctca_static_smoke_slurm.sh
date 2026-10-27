@@ -31,6 +31,10 @@ ctca_canvas_workers="${ctca_canvas_workers:-8}"
 trace_top_k="${trace_top_k:-5}"
 trace_jsonl="${trace_jsonl:-.logs/ctca-m0-one-question_${SLURM_JOB_ID:-manual}.jsonl}"
 trace_tensors="${trace_tensors:-}"
+master_suppress_tokens="${master_suppress_tokens:-}"
+master_begin_suppress_tokens="${master_begin_suppress_tokens:-}"
+read -r -a MASTER_SUPPRESS_ARGS <<< "${master_suppress_tokens}"
+read -r -a MASTER_BEGIN_SUPPRESS_ARGS <<< "${master_begin_suppress_tokens}"
 
 : "${model_a:?model_a is required}"
 : "${model_b:?model_b is required}"
@@ -108,6 +112,8 @@ echo "ctca_canvas_workers=${ctca_canvas_workers}"
 echo "trace_top_k=${trace_top_k}"
 echo "trace_jsonl=${trace_jsonl}"
 echo "trace_tensors=${trace_tensors}"
+echo "master_suppress_tokens=${master_suppress_tokens}"
+echo "master_begin_suppress_tokens=${master_begin_suppress_tokens}"
 echo "question=${question}"
 echo "================================="
 
@@ -162,6 +168,8 @@ python scripts/tse/smoke.py \
     --ctca-min-anchors "${ctca_min_anchors}" \
     --trace-top-k "${trace_top_k}" \
     --trace-jsonl "${trace_jsonl}" \
+    --master-suppress-tokens "${MASTER_SUPPRESS_ARGS[@]}" \
+    --master-begin-suppress-tokens "${MASTER_BEGIN_SUPPRESS_ARGS[@]}" \
     --question "${question}" \
     "${REBUILD_ARGS[@]}" \
     "${TRACE_TENSOR_ARGS[@]}"

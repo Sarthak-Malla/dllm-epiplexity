@@ -540,6 +540,26 @@ protocols.
 
 ### `ctca-llada-master-equivalence-v1`
 
+### CTCA component trace: LLaDA master, one GSM8K question
+
+This mechanism-only smoke run uses the existing structured CTCA trace callback
+to record Dream-to-LLaDA canvas alignment, spatially warped and vocabulary-
+projected probabilities, model and fused top candidates, confidence scores,
+per-position ranks, scheduled transfers, and actual commits. It uses
+`alpha=0.5`, `pta=1.0`, and `ptb=0.1`, so both models contribute to fusion.
+It replays question 0 from the prior low-scoring LLaDA-master samples. The
+standalone trace prompt is zero-shot, so this diagnoses pipeline mechanics and
+does not provide a directly comparable GSM8K accuracy result.
+
+- Experiment ID:
+  `ctca-gsm8k1-llada-master-trace-ptb0p1-a0p5-20261026`.
+- Configuration:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k1_llada_master_trace.conf`.
+- Submission script:
+  `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k1_component_trace_slurm.sh`.
+- Structured trace:
+  `/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k1-component-trace/ctca-gsm8k1-llada-master-trace-ptb0p1-a0p5-20261026/<job-id>/trace.jsonl`.
+
 This operational validation checks the static-fusion endpoint requested for the
 LLaDA-master pipeline. It runs native LLaDA and normal CTCA TSE selection on the
 same LLaDA model instance and prompt, with `master_model=a`, `weighting_mode=static`,

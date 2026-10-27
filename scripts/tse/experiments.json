@@ -317,6 +317,38 @@
       "notes": "Completed on another cluster as job 248130: 170/300 flexible EM and 0/300 strict EM. W&B summary and 300-question sample artifact downloaded locally; raw lm-eval result JSON remains on that cluster. The first 32 prompts and responses exactly match job 248066. Dream MaskGIT+ uses no suppression and samples tokens at temperature 0.1; CTCA temperature_b=0.1 matches probability scaling but current TSE fusion commits greedy tokens."
     },
     {
+      "id": "ctca-gsm8k1-llada-master-trace-ptb0p1-a0p5-20261026",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "ctca-component-tracing-20261026",
+      "method": "ctca_component_trace",
+      "models": ["GSAI-ML/LLaDA-8B-Instruct", "Dream-org/Dream-v0-Instruct-7B"],
+      "protocol_id": "ctca-gsm8k1-component-trace-v1",
+      "config_path": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k1_llada_master_trace.conf",
+      "submission_script": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k1_component_trace_slurm.sh",
+      "job_id": null,
+      "result_glob": "/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k1-component-trace/ctca-gsm8k1-llada-master-trace-ptb0p1-a0p5-20261026/*/results_*.json",
+      "trace_glob": "/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k1-component-trace/ctca-gsm8k1-llada-master-trace-ptb0p1-a0p5-20261026/*/trace.jsonl",
+      "hardware": "2x GPU",
+      "master_model": "llada",
+      "fusion": "probability_mean",
+      "weighting": "static",
+      "alpha": 0.5,
+      "token_sampling_temperature": 0.0,
+      "probability_temperatures": [1.0, 0.1],
+      "commit_score": "selected_token_probability",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "attempts": [
+        {
+          "job_id": "345373",
+          "status": "failed",
+          "reason": "Allocated to gpu-04; srun could not create a job step while the node was busy, then Slurm cancelled the job at the 15-minute time limit."
+        }
+      ],
+      "notes": "Mechanism-only trace, not an lm-eval quality result. Replays one GSM8K question from the earlier low-scoring LLaDA-master run with LLaDA as master, alpha=0.5, ptb=0.1, the LLaDA begin-suppression IDs, and 96 generated tokens over 24 steps. The standalone trace prompt is zero-shot; use it to inspect model alignment/projection, fused probabilities, confidence ranks, and commits, not to compare accuracy directly with the five-shot benchmark. Retry excludes gpu-04 because job 345373 was cancelled there after srun could not start a step; logs indicate node/step contention, not a confirmed GPU hardware fault."
+    },
+    {
       "id": "ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a1-endpoint-pta1p0-ptb0p1-confrank-20261026",
       "status": "planned",
       "group": "ctca",
