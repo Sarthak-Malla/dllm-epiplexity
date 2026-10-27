@@ -405,6 +405,7 @@ class CTCATSESampler:
         )
         with timer("ctca.forward.project_auxiliary"):
             spatial_by_sample = []
+            native_auxiliary_by_sample = []
             for sample_index, (prompt_len, view) in enumerate(zip(prompt_lens, views)):
                 local_active = active_mask[
                     sample_index,
@@ -417,6 +418,10 @@ class CTCATSESampler:
                     ),
                     temperature_auxiliary,
                 )
+                if trace_callback is not None:
+                    native_auxiliary_by_sample.append(
+                        auxiliary_probabilities.detach().cpu()
+                    )
                 overlap_matrix = view.overlap_matrix if block_index is None else None
                 spatial = self.aligner.spatial_warp_model_probabilities(
                     self._aligner_auxiliary_id,
@@ -454,6 +459,8 @@ class CTCATSESampler:
                     "spatial_auxiliary_probabilities": (
                         spatial_auxiliary.detach().cpu()
                     ),
+                    "native_auxiliary_probabilities": native_auxiliary_by_sample,
+                    "master_probabilities": master_probabilities.detach().cpu(),
                     "master_logit_adapter": self._logit_adapter_name(self.master_id),
                     "auxiliary_logit_adapter": self._logit_adapter_name(
                         self.auxiliary_id

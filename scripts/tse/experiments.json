@@ -2,6 +2,29 @@
   "schema_version": 1,
   "experiments": [
     {
+      "id": "ctca-gsm8k2-llada8bi-dream7bi-st0p0-pta1p0-ptb0p1-w0p5-probmean-confrank-fulltrace-20261027",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "ctca-gsm8k2-fulltrace-20261027",
+      "method": "ctca_probability_fusion_diagnostic",
+      "models": ["GSAI-ML/LLaDA-8B-Instruct", "Dream-org/Dream-v0-Instruct-7B"],
+      "protocol_id": "ctca-gsm8k2-fulltrace-v1",
+      "config_path": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k2_fulltrace_correct.conf",
+      "config_paths": [
+        "/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k2_fulltrace_correct.conf",
+        "/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k2_fulltrace_wrong.conf"
+      ],
+      "submission_script": "/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k2_fulltrace_slurm.sh",
+      "result_glob": "/home/sarthak.malla/dllm-epiplexity/.logs/ctca-gsm8k2-fulltrace/ctca-gsm8k2-llada8bi-dream7bi-st0p0-pta1p0-ptb0p1-w0p5-probmean-confrank-fulltrace-20261027/*/*.jsonl",
+      "fusion": "probability_mean",
+      "weighting": "static",
+      "alpha": 0.5,
+      "token_sampling_temperature": 0.0,
+      "probability_temperatures": [1.0, 0.1],
+      "commit_score": "fused_top_probability",
+      "notes": "Two zero-shot mechanism traces (96 generated tokens, 24 steps), selected from LLaDA-master CTCA job 323690: doc 23 was correct, doc 0 was wrong. The earlier outcomes are selection labels, not accuracy claims for this diagnostic. Stores top-64 distributions at every masked position and every step."
+    },
+    {
       "id": "tse-llada-probability-fusion-20261013",
       "status": "completed",
       "group": "tse",

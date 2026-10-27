@@ -13,6 +13,7 @@ decoded trace of every canvas, model prediction, alignment, and fusion step.
 import argparse
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -110,6 +111,11 @@ def parse_args() -> argparse.Namespace:
         "--master-begin-suppress-tokens", type=int, nargs="*", default=None
     )
     parser.add_argument("--question", default=DEFAULT_QUESTION)
+    parser.add_argument("--question-label", default=None)
+    parser.add_argument("--gold-answer", default=None)
+    parser.add_argument("--source-doc-id", type=int, default=None)
+    parser.add_argument("--source-correct", choices=("true", "false"), default=None)
+    parser.add_argument("--source-job-id", default=None)
     return parser.parse_args()
 
 
@@ -192,6 +198,7 @@ def make_ctca_trace_logger(
     top_k: int,
     jsonl_path: str | None = None,
     tensor_path: str | None = None,
+    question_metadata: dict | None = None,
 ):
     from dllm.pipelines.tse.ctca.canvas import build_model_canvas_view
 
@@ -215,7 +222,7 @@ def make_ctca_trace_logger(
     first_forward_saved = False
 
     def top_predictions(tokenizer, logits: torch.Tensor) -> str:
-        values, token_ids = torch.topk(logits.float(), k=min(top_k, logits.shape[-1]))
+        values, token_ids = torch.topk(logits.float(), k=min(top_k, 5, logits.shape[-1]))
         return ", ".join(
             f"{_decode_token(tokenizer, int(token_id))!r}:{float(value):.3f}"
             for value, token_id in zip(values, token_ids)
@@ -223,7 +230,7 @@ def make_ctca_trace_logger(
 
     def top_probabilities(tokenizer, probabilities: torch.Tensor) -> str:
         values, token_ids = torch.topk(
-            probabilities.float(), k=min(top_k, probabilities.shape[-1])
+            probabilities.float(), k=min(top_k, 5, probabilities.shape[-1])
         )
         return ", ".join(
             f"{_decode_token(tokenizer, int(token_id))!r}:{float(value):.6f}"
@@ -236,20 +243,55 @@ def make_ctca_trace_logger(
         )
         return [
             {
-                "token_id": int(token_id),
                 "token": _decode_token(tokenizer, int(token_id)),
                 "probability": float(value),
             }
             for value, token_id in zip(values, token_ids)
         ]
 
+    def distribution(tokenizer, probabilities: torch.Tensor) -> dict:
+        """Keep exact top-k probabilities and account for omitted vocabulary mass."""
+        entries = probability_entries(tokenizer, probabilities)
+        return {
+            "top_k": entries,
+            "top_k_mass": sum(item["probability"] for item in entries),
+            "remaining_mass": max(0.0, 1.0 - sum(item["probability"] for item in entries)),
+            "vocabulary_size": int(probabilities.shape[-1]),
+        }
+
+    def fusion_support(
+        master_probabilities: torch.Tensor,
+        auxiliary_probabilities: torch.Tensor,
+        fused_probabilities: torch.Tensor | None,
+    ) -> list[list]:
+        """Save exact paired probabilities for the union of displayed candidates."""
+        sources = [master_probabilities, auxiliary_probabilities]
+        if fused_probabilities is not None:
+            sources.append(fused_probabilities)
+        token_ids = torch.unique(
+            torch.cat(
+                [
+                    torch.topk(source.float(), k=min(top_k, source.shape[-1])).indices
+                    for source in sources
+                ]
+            ),
+            sorted=True,
+        )
+        return [
+            [
+                _decode_token(master_tokenizer, int(token_id)),
+                float(master_probabilities[token_id]),
+                float(auxiliary_probabilities[token_id]),
+            ]
+            for token_id in token_ids
+        ]
+
     def logit_entries(tokenizer, logits: torch.Tensor) -> list[dict]:
         values, token_ids = torch.topk(
-            logits.float(), k=min(top_k, logits.shape[-1])
+            logits.float(), k=min(top_k, 5, logits.shape[-1])
         )
         return [
             {
-                "token_id": int(token_id),
                 "token": _decode_token(tokenizer, int(token_id)),
                 "logit": float(value),
             }
@@ -361,6 +403,8 @@ def make_ctca_trace_logger(
             master_logits_sampling = payload["master_logits_sampling"]
             auxiliary_logits_sampling = payload["auxiliary_logits_sampling"]
             views = payload["views"]
+            if question_metadata is not None and step == (0, 0):
+                write_record({"event": "question", **question_metadata})
             print(
                 "  sampling-logit adapters: "
                 f"{labels[master_id]}={payload['master_logit_adapter']}, "
@@ -409,6 +453,19 @@ def make_ctca_trace_logger(
                     print(
                         f"    abs pos {absolute_position} gen pos {int(position)} -> "
                         f"{top_predictions(auxiliary_tokenizer, logits)}"
+                    )
+                    write_record(
+                        {
+                            "event": "auxiliary_masked_position",
+                            "step": list(step),
+                            "batch_index": sample_index,
+                            "absolute_position": absolute_position,
+                            "generation_position": int(position),
+                            "distribution": distribution(
+                                auxiliary_tokenizer,
+                                payload["native_auxiliary_probabilities"][sample_index][int(position)],
+                            ),
+                        }
                     )
 
                 overlap = view.overlap_matrix.to_dense().cpu()
@@ -460,13 +517,17 @@ def make_ctca_trace_logger(
                                     sample_index, absolute_position
                                 ],
                             ),
+                            "distribution": distribution(
+                                master_tokenizer,
+                                payload["master_probabilities"][active_index],
+                            ),
                         },
                         "auxiliary": {
                             "logit_adapter": payload["auxiliary_logit_adapter"],
                             "contributors": contributors,
                         },
                         "spatial_warp": {
-                            "top_k": probability_entries(
+                            "distribution": distribution(
                                 auxiliary_tokenizer,
                                 payload["spatial_auxiliary_probabilities"][active_index],
                             ),
@@ -549,7 +610,6 @@ def make_ctca_trace_logger(
                         "batch_index": int(position[0]),
                         "absolute_position": int(position[1]),
                         "predicted_token": {
-                            "token_id": int(token_id),
                             "token": _decode_token(master_tokenizer, int(token_id)),
                             "is_assigned_token_id": bool(
                                 payload["candidate_is_assigned"][index]
@@ -587,16 +647,18 @@ def make_ctca_trace_logger(
                             if payload["master_weights"] is not None
                             else None
                         ),
-                        "master_top_k": probability_entries(
-                            master_tokenizer, payload["master_probabilities"][index]
-                        ),
-                        "projected_auxiliary_top_k": probability_entries(
+                        "projected_auxiliary_distribution": distribution(
                             master_tokenizer, payload["auxiliary_probabilities"][index]
                         ),
-                        "fused_top_k": (
-                            probability_entries(master_tokenizer, fused_probabilities[index])
-                            if fused_probabilities is not None
-                            else None
+                        "fused_distribution": (
+                            distribution(master_tokenizer, fused_probabilities[index])
+                            if fused_probabilities is not None else None
+                        ),
+                        "fusion_support": fusion_support(
+                            payload["master_probabilities"][index],
+                            payload["auxiliary_probabilities"][index],
+                            fused_probabilities[index]
+                            if fused_probabilities is not None else None,
                         ),
                     }
                 )
@@ -623,7 +685,6 @@ def make_ctca_trace_logger(
                         "step": list(step),
                         "batch_index": int(position[0]),
                         "absolute_position": int(position[1]),
-                        "predicted_token_id": int(payload["predicted_tokens"][index]),
                         "predicted_token": _decode_token(
                             master_tokenizer, int(payload["predicted_tokens"][index])
                         ),
@@ -682,6 +743,10 @@ def make_ctca_trace_logger(
                     "sample_elapsed_seconds": payload["sample_elapsed_seconds"],
                 }
             )
+            return
+
+        if event == "result":
+            write_record({"event": "question_result", **payload})
             if jsonl_handle is not None:
                 jsonl_handle.close()
 
@@ -815,6 +880,17 @@ def main() -> None:
             args.trace_top_k,
             args.trace_jsonl,
             args.trace_tensors,
+            {
+                "question": args.question,
+                "label": args.question_label,
+                "gold_answer": args.gold_answer,
+                "source_doc_id": args.source_doc_id,
+                "source_correct": (
+                    args.source_correct == "true"
+                    if args.source_correct is not None else None
+                ),
+                "source_job_id": args.source_job_id,
+            },
         )
     generated = sampler.sample(
         [prompt_ids],
@@ -842,6 +918,25 @@ def main() -> None:
             else {}
         ),
     )
+    if args.ctca:
+        response = tokenizer.decode(
+            generated[0, prompt_ids.numel():].tolist(), skip_special_tokens=True
+        )
+        numeric_answers = re.findall(r"-?\d[\d,]*(?:\.\d+)?", response)
+        extracted_answer = numeric_answers[-1].replace(",", "") if numeric_answers else None
+        sampler_inputs["trace_callback"](
+            "result",
+            {
+                "response": response,
+                "extracted_last_number": extracted_answer,
+                "gold_answer": args.gold_answer,
+                "matches_gold_by_last_number": (
+                    extracted_answer == args.gold_answer
+                    if args.gold_answer is not None else None
+                ),
+                "extraction_method": "last_numeric_literal_diagnostic",
+            },
+        )
     synchronize_cuda_devices()
     smoke_elapsed_seconds = time.perf_counter() - smoke_start_time
 

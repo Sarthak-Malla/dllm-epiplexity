@@ -1,5 +1,6 @@
 """Run with: pytest scripts/tests/test_ctca_sampler.py -v"""
 
+import json
 from types import SimpleNamespace
 
 import torch
@@ -26,11 +27,15 @@ class CharacterTokenizer:
     def get_vocab(self):
         return dict(self._vocab)
 
+    def convert_ids_to_tokens(self, token_id):
+        return self._tokens[int(token_id)]
+
     def decode(self, token_ids, **kwargs):
+        skip_special_tokens = kwargs.get("skip_special_tokens", True)
         return "".join(
             self._tokens[int(token_id)]
             for token_id in token_ids
-            if int(token_id) not in self.all_special_ids
+            if not skip_special_tokens or int(token_id) not in self.all_special_ids
         )
 
     def __call__(self, text, *, return_offsets_mapping=False, **kwargs):
@@ -438,6 +443,68 @@ def test_ctca_sampler_trace_exposes_forward_fusion_and_commit_decisions():
     assert summary["sample_elapsed_seconds"] is not None
     assert summary["sample_elapsed_seconds"] >= 0
     assert sampler.last_sample_elapsed_seconds == summary["sample_elapsed_seconds"]
+
+
+def test_ctca_jsonl_trace_with_dummy_model_outputs(tmp_path, capsys):
+    """Trace a masked sentence through two fixed-output models and projection."""
+    from scripts.tse.ctca.generate_dummy_trace import generate
+
+    path = tmp_path / "dummy_trace.jsonl"
+    generate(path)
+    capsys.readouterr()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0]["event"] == "question"
+    assert records[0]["masked_instance"] == "The cat sat on the [MASK][MASK]"
+    assert records[-1]["event"] == "question_result"
+    assert records[-1]["response"] == "mat."
+    forwards = [r for r in records if r["event"] == "forward_position"]
+    auxiliaries = [r for r in records if r["event"] == "auxiliary_masked_position"]
+    fusions = [r for r in records if r["event"] == "fusion_candidate"]
+    decisions = [r for r in records if r["event"] == "commit_decision"]
+    assert forwards and auxiliaries and fusions and decisions
+    assert len(forwards) == len(fusions) == len(decisions)
+    distributions = (
+        [r["master"]["distribution"] for r in forwards]
+        + [r["distribution"] for r in auxiliaries]
+        + [r["spatial_warp"]["distribution"] for r in forwards]
+        + [r["projected_auxiliary_distribution"] for r in fusions]
+        + [r["fused_distribution"] for r in fusions]
+    )
+    for distribution in distributions:
+        assert len(distribution["top_k"]) == 3
+        assert all("token_id" not in entry for entry in distribution["top_k"])
+        assert all(isinstance(entry["token"], str) for entry in distribution["top_k"])
+        assert abs(distribution["top_k_mass"] + distribution["remaining_mass"] - 1) < 1e-5
+    assert all("master_top_k" not in record for record in fusions)
+    assert all("token_id" not in record["predicted_token"] for record in fusions)
+    for record in fusions:
+        assert record["fusion_support"]
+        support_by_token = {item[0]: item for item in record["fusion_support"]}
+        for entry in record["projected_auxiliary_distribution"]["top_k"]:
+            assert abs(
+                support_by_token[entry["token"]][2] - entry["probability"]
+            ) < 1e-7
+        predicted = next(
+            item for item in record["fusion_support"]
+            if item[0] == record["predicted_token"]["token"]
+        )
+        master_weight = record["weights"]["master"]
+        preview_probability = (
+            master_weight * predicted[1] + (1 - master_weight) * predicted[2]
+        )
+        assert abs(preview_probability - record["fused_probability"]) < 1e-5
+    first_master = next(
+        record for record in forwards
+        if record["step"] == [0, 0] and record["master"]["generation_position"] == 0
+    )
+    first_auxiliary = next(
+        record for record in auxiliaries
+        if record["step"] == [0, 0] and record["generation_position"] == 0
+    )
+    assert first_master["master"]["distribution"]["top_k"][0]["token"] == "mat"
+    assert first_auxiliary["distribution"]["top_k"][0]["token"] == "rug"
+    assert sum(record["selected"] for record in decisions) == 2
 
 
 def test_ctca_sampler_applies_dream_right_shift_in_either_role():

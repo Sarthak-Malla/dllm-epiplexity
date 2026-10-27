@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCA masked-token trace · sentence demo</title>
+<style>
+body { font: 15px system-ui, sans-serif; margin: 24px auto; max-width: 1400px; padding: 0 18px; color: #202733; background: #fafbfd; }
+h1 { margin-bottom: 5px; } .hint { color: #566173; } .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 20px 0; }
+label { display: grid; gap: 5px; font-weight: 600; } select, input { font: inherit; padding: 7px; max-width: 340px; }
+.card { background: white; border: 1px solid #dce2e8; border-radius: 8px; margin: 14px 0; padding: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(370px, 1fr)); gap: 12px; }
+.row { display: grid; grid-template-columns: 38px minmax(80px, 1fr) 76px; gap: 8px; align-items: center; margin: 3px 0; font-variant-numeric: tabular-nums; }
+.token { overflow-wrap: anywhere; } .bar { height: 5px; background: #dbe6f3; border-radius: 4px; grid-column: 2 / 4; margin-top: -5px; }
+.fill { height: 100%; background: #3476c5; border-radius: 4px; } .muted { color: #697587; } pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 500px; overflow: auto; }
+details { margin-top: 12px; } button { font: inherit; padding: 7px 12px; } .summary { display: flex; flex-wrap: wrap; gap: 16px; }
+</style>
+</head>
+<body>
+<h1>CTCA masked-token trace <small class="muted">actual-run loader · 27 Oct</small></h1>
+<p class="hint">The latest completed two-question run loads automatically. Before it finishes, the sentence demo appears. Reload or click “Load latest run” after the job completes.</p>
+<div class="toolbar">
+<button id="loadLatest" type="button">Load latest run</button>
+<label>Server trace URLs (comma separated) <input id="urls" type="text" value="demo_dummy_trace.jsonl"></label>
+<button id="loadUrls" type="button">Load server traces</button>
+<label>Trace files <input id="files" type="file" accept=".jsonl" multiple></label>
+<label>Question <select id="case"></select></label>
+<label>Decoding step <select id="step"></select></label>
+<label>Masked position <select id="position"></select></label>
+<label>Show first <input id="limit" type="number" min="1" max="64" value="20"></label>
+<label>Master weight <input id="masterWeight" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+<span id="weightLabel">Master 50% · Auxiliary 50%</span>
+<button id="resetWeight" type="button">Use recorded weight</button>
+</div>
+<p id="loadStatus" class="hint">No trace loaded.</p>
+<div id="content" class="hint">Select one or both JSONL files to begin.</div>
+<script>
+const $ = id => document.getElementById(id);
+const cases = new Map();
+let weightTouched = false;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const key = r => `${r.step[0]}.${r.step[1]}`;
+function option(select, value, label) { const el = document.createElement('option'); el.value = value; el.textContent = label; select.append(el); }
+function distribution(title, d) {
+  if (!d) return '';
+  const limit = Math.max(1, Math.min(64, Number($('limit').value) || 20));
+  const top = d.top_k || [];
+  const max = top[0]?.probability || 1;
+  return `<div class="card"><h3>${esc(title)}</h3><p class="muted">Top-${top.length} mass: ${(d.top_k_mass ?? 0).toFixed(6)} · Remaining: ${(d.remaining_mass ?? 0).toFixed(6)} · Vocabulary: ${d.vocabulary_size ?? '?'}</p>` +
+    top.slice(0, limit).map((e, i) => `<div class="row"><span>${i+1}</span><span class="token">${esc(e.token)}</span><span>${e.probability.toPrecision(5)}</span><div class="bar"><div class="fill" style="width:${Math.min(100, 100*e.probability/max)}%"></div></div></div>`).join('') + '</div>';
+}
+function populate() {
+  $('case').replaceChildren();
+  for (const name of cases.keys()) option($('case'), name, name);
+  $('loadStatus').textContent = `Loaded ${cases.size} trace file${cases.size === 1 ? '' : 's'}: ${[...cases.keys()].join(', ')}`;
+  updateSteps();
+}
+function updateSteps() {
+  const data = cases.get($('case').value); $('step').replaceChildren();
+  if (data) for (const step of data.steps.keys()) option($('step'), step, step);
+  updatePositions();
+}
+function updatePositions() {
+  const data = cases.get($('case').value); const positions = data?.steps.get($('step').value);
+  $('position').replaceChildren();
+  if (positions) for (const position of [...positions.keys()].sort((a, b) =>
+    Number(!a.startsWith('master')) - Number(!b.startsWith('master')) ||
+    Number(a.split(' ')[1]) - Number(b.split(' ')[1]))) option($('position'), position, position);
+  render();
+}
+function render() {
+  const data = cases.get($('case').value); const group = data?.steps.get($('step').value)?.get($('position').value);
+  if (!group) { $('content').textContent = 'No position selected.'; return; }
+  const q = data.question || {}, result = data.result || {};
+  const f = group.forward_position;
+  const fusion = group.fusion_candidate;
+  const decision = group.commit_decision;
+  const aux = group.auxiliary_masked_position;
+  if (!weightTouched && fusion?.weights?.master != null) $('masterWeight').value = fusion.weights.master;
+  const masterWeight = Number($('masterWeight').value);
+  $('weightLabel').textContent = `Master ${(100 * masterWeight).toFixed(0)}% · Auxiliary ${(100 * (1 - masterWeight)).toFixed(0)}%`;
+  let selectedWeightFusion = null;
+  let supportMass = null;
+  let previewWinner = null;
+  if (fusion?.fusion_support) {
+    const candidates = fusion.fusion_support.map(([token, master, auxiliary]) => ({
+      token, probability: masterWeight * master + (1 - masterWeight) * auxiliary,
+    })).sort((a, b) => b.probability - a.probability);
+    const k = fusion.fused_distribution?.top_k?.length || 64;
+    const top = candidates.slice(0, k);
+    const topMass = top.reduce((sum, item) => sum + item.probability, 0);
+    supportMass = candidates.reduce((sum, item) => sum + item.probability, 0);
+    selectedWeightFusion = {top_k: top, top_k_mass: topMass, remaining_mass: Math.max(0, 1 - topMass), vocabulary_size: fusion.fused_distribution?.vocabulary_size};
+    if (masterWeight === 0) selectedWeightFusion = fusion.projected_auxiliary_distribution;
+    if (masterWeight === 1 && f?.master?.distribution) selectedWeightFusion = f.master.distribution;
+    previewWinner = selectedWeightFusion?.top_k?.[0];
+  }
+  const outcome = result.extraction_method === 'exact_string_demo'
+    ? `<span>Generated completion: <b>${esc(result.response)}</b></span><span>Matches expected: ${esc(result.matches_gold)}</span>`
+    : `<span>New response last number: ${esc(result.extracted_last_number)}</span><span>Matches gold by last number: ${esc(result.matches_gold_by_last_number)}</span>`;
+  let html = `<div class="card"><h2>${esc(q.label || data.name)}</h2><p>${esc(q.question || '')}</p><p class="muted">${esc(q.note || '')}</p><div class="summary"><span>Gold: <b>${esc(q.gold_answer)}</b></span>${q.source_job_id ? `<span>Previous CTCA job: ${esc(q.source_job_id)}</span><span>Document: ${esc(q.source_doc_id)}</span><span>Previously correct: ${esc(q.source_correct)}</span>` : ''}${outcome}</div><details><summary>Full model response</summary><pre>${esc(result.response || '')}</pre></details></div>`;
+  if (fusion) html += `<div class="card"><h3>Recorded fusion and selection</h3><div class="summary"><span>Predicted: ${esc(fusion.predicted_token?.token)}</span><span>Master weight: ${fusion.weights?.master ?? '?'}</span><span>Auxiliary weight: ${fusion.weights?.auxiliary ?? '?'}</span><span>Score: ${esc(fusion.selection_score?.name)} = ${fusion.selection_score?.value ?? '?'}</span><span>JS divergence: ${fusion.jensen_shannon_divergence ?? '?'}</span><span>Agreement: ${fusion.agreement ?? '?'}</span><span>Committed: ${decision?.selected ?? '?'}</span><span>Rank: ${decision?.selection_rank ?? '?'}</span><span>Transfer count: ${decision?.scheduled_transfer_count ?? '?'}</span></div></div>`;
+  if (selectedWeightFusion) {
+    html += `<div class="card"><h3>Fusion at selected weights</h3><p>Top candidate: <b>${esc(previewWinner?.token)}</b> · probability ${previewWinner?.probability.toFixed(6)}. Saved candidate coverage: ${(100 * supportMass).toFixed(2)}%. At 0% master this is the projected auxiliary distribution; at 100% it is the master distribution. Later decoding steps and commits stay as recorded.</p></div>`;
+  } else if (fusion) {
+    html += '<div class="card">This older trace has no paired candidate probabilities for the weight slider. Regenerate the trace to explore weights.</div>';
+  }
+  html += '<div class="grid">';
+  if (f) {
+    html += distribution('Master native mask', f.master?.distribution);
+    html += distribution('Spatially warped auxiliary', f.spatial_warp?.distribution);
+    for (const c of f.auxiliary?.contributors || []) {
+      const native = data.steps.get($('step').value)?.get(`aux ${c.generation_position}`)?.auxiliary_masked_position;
+      html += native ? distribution(`Auxiliary native mask · generation ${c.generation_position} · overlap ${c.overlap}`, native.distribution)
+        : `<div class="card"><h3>Auxiliary contributor</h3><p>Generation position ${c.generation_position}, overlap ${c.overlap}</p><p>Canvas token: ${esc(c.canvas_token)}</p></div>`;
+    }
+  }
+  if (aux) html += distribution('Auxiliary native mask', aux.distribution);
+  if (fusion) {
+    html += distribution('Auxiliary projected to master vocabulary', fusion.projected_auxiliary_distribution);
+    html += distribution('Fused at selected weights', selectedWeightFusion || fusion.fused_distribution);
+  }
+  html += '</div>';
+  if (fusion?.fused_distribution) html += `<details><summary>Recorded fused distribution at master weight ${fusion.weights?.master ?? '?'}</summary>${distribution('Recorded fused distribution', fusion.fused_distribution)}</details>`;
+  html += '<details><summary>Raw records for this position</summary><pre>' + esc(JSON.stringify(group, null, 2)) + '</pre></details>';
+  $('content').innerHTML = html;
+}
+function addTrace(name, traceText) {
+    const data = {name, steps:new Map(), question:null, result:null};
+    for (const line of traceText.split('\n')) {
+      if (!line.trim()) continue;
+      let r; try { r = JSON.parse(line); } catch (error) { console.warn(name, error); continue; }
+      if (r.event === 'question') { data.question = r; continue; }
+      if (r.event === 'question_result') { data.result = r; continue; }
+      if (!r.step || !['forward_position','fusion_candidate','commit_decision','auxiliary_masked_position'].includes(r.event)) continue;
+      const s = key(r); if (!data.steps.has(s)) data.steps.set(s, new Map());
+      const positions = data.steps.get(s);
+      const p = r.event === 'auxiliary_masked_position' ? `aux ${r.generation_position}` : `master ${r.master?.absolute_position ?? r.absolute_position}`;
+      if (!positions.has(p)) positions.set(p, {});
+      positions.get(p)[r.event] = r;
+    }
+    cases.set(name, data);
+}
+async function loadServerTraces() {
+  cases.clear(); $('content').textContent = 'Loading traces…';
+  try {
+    for (const path of $('urls').value.split(',').map(value => value.trim()).filter(Boolean)) {
+      const url = new URL(path, location.href);
+      if (url.origin !== location.origin) throw new Error('Trace URLs must be on this server');
+      const response = await fetch(url, {cache: 'no-store'});
+      if (!response.ok) throw new Error(`${url.pathname}: HTTP ${response.status}`);
+      addTrace(url.pathname.split('/').pop(), await response.text());
+    }
+    populate();
+  } catch (error) {
+    $('loadStatus').textContent = 'Trace load failed.';
+    $('content').textContent = `Could not load trace: ${error.message}`;
+  }
+}
+async function loadLatestRun() {
+  const manifestUrl = '/.logs/ctca-gsm8k2-fulltrace/latest.json';
+  try {
+    const response = await fetch(manifestUrl, {cache: 'no-store'});
+    if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
+    const manifest = await response.json();
+    if (!Array.isArray(manifest.traces) || manifest.traces.length !== 2) {
+      throw new Error('manifest has no two-question trace list');
+    }
+    $('urls').value = manifest.traces.join(',');
+    await loadServerTraces();
+    if (cases.size === 2) $('loadStatus').textContent += ` · job ${manifest.job_id}`;
+  } catch (error) {
+    $('urls').value = 'demo_dummy_trace.jsonl';
+    await loadServerTraces();
+    $('loadStatus').textContent += ' · waiting for completed two-question run';
+  }
+}
+$('loadLatest').addEventListener('click', loadLatestRun);
+$('loadUrls').addEventListener('click', loadServerTraces);
+$('files').addEventListener('change', async event => {
+  cases.clear(); $('content').textContent = 'Loading traces…';
+  for (const file of event.target.files) addTrace(file.name, await file.text());
+  populate();
+});
+$('case').addEventListener('change', updateSteps);
+$('step').addEventListener('change', updatePositions);
+$('position').addEventListener('change', render);
+$('limit').addEventListener('input', render);
+$('masterWeight').addEventListener('input', () => { weightTouched = true; render(); });
+$('resetWeight').addEventListener('click', () => { weightTouched = false; render(); });
+if (location.protocol === 'http:' || location.protocol === 'https:') loadLatestRun();
+</script>
+</body>
+</html>

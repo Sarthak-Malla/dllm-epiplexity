@@ -137,6 +137,23 @@ if [[ -n "${trace_tensors}" ]]; then
     TRACE_TENSOR_ARGS+=(--trace-tensors "${trace_tensors}")
 fi
 
+QUESTION_METADATA_ARGS=()
+if [[ -n "${question_label:-}" ]]; then
+    QUESTION_METADATA_ARGS+=(--question-label "${question_label}")
+fi
+if [[ -n "${gold_answer:-}" ]]; then
+    QUESTION_METADATA_ARGS+=(--gold-answer "${gold_answer}")
+fi
+if [[ -n "${source_doc_id:-}" ]]; then
+    QUESTION_METADATA_ARGS+=(--source-doc-id "${source_doc_id}")
+fi
+if [[ -n "${source_correct:-}" ]]; then
+    QUESTION_METADATA_ARGS+=(--source-correct "${source_correct}")
+fi
+if [[ -n "${source_job_id:-}" ]]; then
+    QUESTION_METADATA_ARGS+=(--source-job-id "${source_job_id}")
+fi
+
 python scripts/tse/smoke.py \
     --model-a "${model_a}" \
     --model-b "${model_b}" \
@@ -171,5 +188,6 @@ python scripts/tse/smoke.py \
     --master-suppress-tokens "${MASTER_SUPPRESS_ARGS[@]}" \
     --master-begin-suppress-tokens "${MASTER_BEGIN_SUPPRESS_ARGS[@]}" \
     --question "${question}" \
+    "${QUESTION_METADATA_ARGS[@]}" \
     "${REBUILD_ARGS[@]}" \
     "${TRACE_TENSOR_ARGS[@]}"
