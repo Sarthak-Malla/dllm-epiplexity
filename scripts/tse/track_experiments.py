@@ -64,6 +64,12 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 0,
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-dual-master-nosuppress-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,  # lm-eval supplies five; each model selects its own count.
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-gsm8k32-dream-batch-v1": {
         "task": "gsm8k_cot",
         "samples": 32,

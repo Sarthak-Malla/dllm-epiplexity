@@ -456,6 +456,31 @@ therefore does not isolate fusion alone. A later sampling-matched comparison
 needs a Dream control with greedy token proposals and 0.1 probability scaling,
 or a CTCA path that samples fused tokens.
 
+### `ctca-gsm8k300-dual-master-nosuppress-v1`
+
+The study `ctca-dual-master-nosuppression-20261026` runs the same 300 GSM8K
+questions through two 50/50 LLaDA/Dream probability ensembles, changing the
+master canvas between LLaDA and Dream. LLaDA is model A, five-shot, with
+`temperature_a=1.0`; Dream is model B, zero-shot, with
+`temperature_b=0.1`. Both use `bfloat16`, batch size 8, 512 tokens, 128
+steps, block size 32, confidence ranking, greedy fused token proposals,
+static `alpha=0.5`, `weight_temperature=1.0`, and empty Dream suppression
+lists. LLaDA retains its native `[126081;126348]` beginning-token list.
+
+| Master | Canvas prompt | Fusion device | Config | Submission script |
+|---|---|---|---|---|
+| LLaDA | five-shot | `cuda:0` | `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_nosuppress_llada_master.conf` | `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_nosuppress_llada_master_slurm.sh` |
+| Dream | zero-shot | `cuda:1` | `/home/sarthak.malla/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_nosuppress_dream_master.conf` | `/home/sarthak.malla/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_nosuppress_dream_master_slurm.sh` |
+
+In the CTCA implementation, beginning-token suppression applies only to the
+master's commit scores. Clearing Dream's list affects the Dream-master run;
+it does not change the LLaDA-master computation because Dream is auxiliary.
+The LLaDA-master condition is therefore a new-cluster rerun of the earlier
+five/zero, `temperature_b=0.1`, confidence-ranked CTCA condition. The Dream
+master directly tests the no-suppression setting on a Dream token canvas.
+Both CTCA runs choose fused tokens greedily and use blockwise generation,
+whereas the native Dream baseline samples at temperature 0.1 without CTCA
+blocks. Interpret native-versus-ensemble differences with those distinctions.
 
 ### `ctca-gsm8k300-entropy-v1`
 
