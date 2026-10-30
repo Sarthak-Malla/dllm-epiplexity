@@ -43,6 +43,7 @@ class TSEConfig:
     ctca_projection_temperature: float = 0.05
     ctca_chunk_size: int = 2500
     ctca_projection_mode: str = "sparse_topk"
+    ctca_shared_token_policy: str = "exact_shared"
     ctca_projection_top_k: int = 64
     ctca_num_anchors: int | str = "auto"
     ctca_min_anchors: int = 128

@@ -18,6 +18,7 @@ from .relative import (
     RelativeAnchorSelection,
     build_sparse_topk_relative_anchor_projection,
     collect_relative_anchor_ids,
+    preserve_shared_token_rows,
     project_vocab_relative_exact,
 )
 from dllm.pipelines.tse.utils import timer
@@ -50,12 +51,16 @@ class CrossTokenizerAligner:
         master_id: str,
         cache_dir: str | None = ".cache/ctca",
         force_rebuild: bool = False,
+        shared_token_policy: str = "exact_shared",
     ) -> None:
         if master_embeddings.ndim != 2:
             raise ValueError("master_embeddings must have shape [vocab_size, hidden_size]")
         self.master_tokenizer = master_tokenizer
         self.master_embeddings = master_embeddings.detach()
         self.master_id = master_id
+        if shared_token_policy not in {"relative", "exact_shared"}:
+            raise ValueError("shared_token_policy must be 'relative' or 'exact_shared'")
+        self.shared_token_policy = shared_token_policy
         self.cache = CTCACacheManager(cache_dir, force_rebuild=force_rebuild)
         self.auxiliary_models: dict[str, AuxiliaryRegistration] = {}
 
@@ -142,6 +147,13 @@ class CrossTokenizerAligner:
                     required_keys=("top_indices", "top_weights"),
                 )
             cached = (tensors["top_indices"], tensors["top_weights"])
+            if self.shared_token_policy == "exact_shared":
+                cached = preserve_shared_token_rows(
+                    *cached,
+                    registration.tokenizer,
+                    self.master_tokenizer,
+                    master_vocab_size=self.master_embeddings.shape[0],
+                )
             registration.sparse_topk_by_device[key] = cached
             registration.sparse_topk_rebuilt_by_device[key] = rebuilt
         return cached
@@ -178,6 +190,11 @@ class CrossTokenizerAligner:
             "anchor_temperature": registration.anchor_temperature,
             "projection_temperature": registration.temperature,
             "sparse_topk_cache_rebuilt": dict(registration.sparse_topk_rebuilt_by_device),
+            "shared_token_policy": (
+                self.shared_token_policy
+                if registration.projection_mode == "sparse_topk"
+                else "relative"
+            ),
         }
 
     def warm_projection_cache(self, auxiliary_id: str, device: torch.device) -> None:

@@ -11,6 +11,7 @@ Run from the repository root with:
 """
 
 import argparse
+import hashlib
 import json
 import os
 from numbers import Number
@@ -72,6 +73,16 @@ def resolve_result_path(result_path: Path) -> Path:
     raise FileNotFoundError(f"lm-eval result file not found: {result_path}")
 
 
+def sample_artifact_name(run_name: str) -> str:
+    """Keep long run names distinct within W&B's artifact name limit."""
+    suffix = "-samples"
+    if len(run_name) + len(suffix) <= 120:
+        return f"{run_name}{suffix}"
+    digest = hashlib.sha256(run_name.encode("utf-8")).hexdigest()[:12]
+    suffix = f"-{digest}{suffix}"
+    return f"{run_name[:120 - len(suffix)]}{suffix}"
+
+
 def main() -> None:
     args = parse_args()
     result_path = resolve_result_path(args.result_path)
@@ -116,7 +127,7 @@ def main() -> None:
     sample_paths = sorted(result_path.parent.glob("samples_*.jsonl"))
     if sample_paths:
         artifact = wandb.Artifact(
-            f"{args.run_name}-samples",
+            sample_artifact_name(args.run_name),
             type="evaluation_samples",
         )
         for sample_path in sample_paths:

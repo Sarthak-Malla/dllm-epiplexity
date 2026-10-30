@@ -70,6 +70,18 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 5,  # lm-eval supplies five; each model selects its own count.
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-dualmaster-exactshared-ptb1p0-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,  # LLaDA uses five; Dream selects zero.
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k300-dreammaster-a0-endpoint-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,  # LLaDA receives five; the Dream canvas uses zero.
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-gsm8k32-dream-batch-v1": {
         "task": "gsm8k_cot",
         "samples": 32,

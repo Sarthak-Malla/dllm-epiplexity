@@ -31,6 +31,7 @@ DEFAULT_QUESTION = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-a", required=True)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--model-b", required=True)
     parser.add_argument("--model-a-device", default="cuda:0")
     parser.add_argument("--model-b-device", default="cuda:1")
@@ -93,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-model", choices=("a", "b"), default="a")
     parser.add_argument("--ctca-cache-dir", default=".cache/ctca")
     parser.add_argument("--ctca-force-rebuild", action="store_true")
+    parser.add_argument(
+        "--ctca-shared-token-policy",
+        choices=("relative", "exact_shared"),
+        default="exact_shared",
+    )
     parser.add_argument("--ctca-anchor-temperature", type=float, default=0.01)
     parser.add_argument("--ctca-projection-temperature", type=float, default=0.05)
     parser.add_argument("--ctca-chunk-size", type=int, default=2500)
@@ -111,6 +117,8 @@ def parse_args() -> argparse.Namespace:
         "--master-begin-suppress-tokens", type=int, nargs="*", default=None
     )
     parser.add_argument("--question", default=DEFAULT_QUESTION)
+    parser.add_argument("--prompt-a-file", type=Path, default=None)
+    parser.add_argument("--prompt-b-file", type=Path, default=None)
     parser.add_argument("--question-label", default=None)
     parser.add_argument("--gold-answer", default=None)
     parser.add_argument("--source-doc-id", type=int, default=None)
@@ -199,6 +207,7 @@ def make_ctca_trace_logger(
     jsonl_path: str | None = None,
     tensor_path: str | None = None,
     question_metadata: dict | None = None,
+    shared_token_policy: str = "exact_shared",
 ):
     from dllm.pipelines.tse.ctca.canvas import build_model_canvas_view
 
@@ -206,6 +215,14 @@ def make_ctca_trace_logger(
         "a": "model A (LLaDA)",
         "b": "model B (Dream)",
     }
+    def projection_route(mode: str) -> str:
+        if mode == "exact":
+            return "relative_anchor_exact"
+        return (
+            "relative_anchor_plus_exact_shared"
+            if shared_token_policy == "exact_shared"
+            else "relative_anchor_only"
+        )
     jsonl_handle = None
     if jsonl_path is not None:
         trace_path = Path(jsonl_path)
@@ -534,7 +551,7 @@ def make_ctca_trace_logger(
                         },
                         "vocabulary_projection": {
                             "mode": payload["projection_mode"],
-                            "route": "relative_anchor_only",
+                            "route": projection_route(payload["projection_mode"]),
                         },
                     }
                 )
@@ -714,7 +731,8 @@ def make_ctca_trace_logger(
                     "  mean agreement:",
                     f"{trace_stats['agreement_total'] / candidate_count:.6f}",
                 )
-            print("  projection route: relative_anchor_only")
+            route = projection_route(payload["projection_mode"])
+            print("  projection route:", route)
             print(
                 "  CTCA sample elapsed seconds:",
                 f"{payload['sample_elapsed_seconds']:.4f}",
@@ -739,7 +757,7 @@ def make_ctca_trace_logger(
                         if candidate_count
                         else None
                     ),
-                    "projection_route": "relative_anchor_only",
+                    "projection_route": route,
                     "sample_elapsed_seconds": payload["sample_elapsed_seconds"],
                 }
             )
@@ -756,6 +774,8 @@ def make_ctca_trace_logger(
 def main() -> None:
     smoke_start_time = time.perf_counter()
     args = parse_args()
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
     print_import_summary()
     from dllm.pipelines.tse import TSEConfig, TSESampler
     from dllm.pipelines.tse.loader import load_tse_models
@@ -825,6 +845,16 @@ def main() -> None:
             return_tensors="pt",
         )[0]
         auxiliary_prompt_ids = torch.as_tensor(auxiliary_prompt_ids)
+    if args.prompt_a_file is not None or args.prompt_b_file is not None:
+        if not args.ctca or args.prompt_a_file is None or args.prompt_b_file is None:
+            raise ValueError("Prompt replay requires CTCA and both native prompt files")
+        native_files = {"a": args.prompt_a_file, "b": args.prompt_b_file}
+        prompt_ids = tokenizer(
+            native_files[args.master_model].read_text(), return_tensors="pt"
+        )["input_ids"][0]
+        auxiliary_prompt_ids = auxiliary_tokenizer(
+            native_files[auxiliary_name].read_text(), return_tensors="pt"
+        )["input_ids"][0]
     print("\nPrompt:", args.question)
     print("Prompt token count:", prompt_ids.numel())
     print("Prompt IDs:", prompt_ids.tolist())
@@ -845,6 +875,7 @@ def main() -> None:
             auxiliary_id=auxiliary_name,
             cache_dir=args.ctca_cache_dir,
             force_rebuild=args.ctca_force_rebuild,
+            shared_token_policy=args.ctca_shared_token_policy,
             anchor_temperature=args.ctca_anchor_temperature,
             projection_temperature=args.ctca_projection_temperature,
             projection_chunk_size=args.ctca_chunk_size,
@@ -891,6 +922,7 @@ def main() -> None:
                 ),
                 "source_job_id": args.source_job_id,
             },
+            args.ctca_shared_token_policy,
         )
     generated = sampler.sample(
         [prompt_ids],

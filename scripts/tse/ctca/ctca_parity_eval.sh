@@ -15,6 +15,7 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
 fi
 tse_print_config_file "${CONFIG_PATH}"
 source "${CONFIG_PATH}"
+ctca_shared_token_policy="${ctca_shared_token_policy:-exact_shared}"
 
 : "${protocol_id:?protocol_id is required}"
 : "${experiment_name:?experiment_name is required}"
@@ -67,8 +68,8 @@ export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export CTCA_CANVAS_WORKERS="${ctca_canvas_workers}"
 
-srun nvidia-smi
-srun --ntasks=1 --nodes=1 python scripts/tse/cuda_preflight.py \
+nvidia-smi
+python scripts/tse/cuda_preflight.py \
     --minimum-device-count 2
 
 ATTEMPT_ID="${SLURM_JOB_ID:-manual}"
@@ -78,7 +79,7 @@ CACHE_PATH=".cache/lm_eval_responses/${protocol_id}/${experiment_name}"
 RUN_NAME="${experiment_name}-${ATTEMPT_ID}"
 mkdir -p "${RUN_DIR}" "$(dirname "${CACHE_PATH}")"
 
-MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},model_a_suppress_tokens=${model_a_suppress_tokens},model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens},model_b_suppress_tokens=${model_b_suppress_tokens},model_b_begin_suppress_tokens=${model_b_begin_suppress_tokens},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_anchor_temperature=${ctca_anchor_temperature},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
+MODEL_ARGS="model_a=${model_a},model_b=${model_b},model_a_device=${model_a_device},model_b_device=${model_b_device},fusion_device=${fusion_device},dtype=${dtype},max_new_tokens=${max_new_tokens},steps=${steps},block_size=${block_size},selection_mode=${selection_mode},weighting_mode=${weighting_mode},alpha=${alpha},temperature_a=${temperature_a},temperature_b=${temperature_b},weight_temperature=${weight_temperature},temperature=${temperature},remasking=${remasking},stochastic_transfer=${stochastic_transfer},capture_logits=${capture_logits},normalize_entropy=${normalize_entropy},epsilon=${epsilon},ctca_enabled=${ctca_enabled},master_model=${master_model},model_a_suppress_tokens=${model_a_suppress_tokens},model_a_begin_suppress_tokens=${model_a_begin_suppress_tokens},model_b_suppress_tokens=${model_b_suppress_tokens},model_b_begin_suppress_tokens=${model_b_begin_suppress_tokens},ctca_cache_dir=${ctca_cache_dir},ctca_force_rebuild=${ctca_force_rebuild},ctca_anchor_temperature=${ctca_anchor_temperature},ctca_projection_temperature=${ctca_projection_temperature},ctca_chunk_size=${ctca_chunk_size},ctca_projection_mode=${ctca_projection_mode},ctca_shared_token_policy=${ctca_shared_token_policy},ctca_projection_top_k=${ctca_projection_top_k},ctca_num_anchors=${ctca_num_anchors},ctca_min_anchors=${ctca_min_anchors}"
 if [[ -n "${model_a_num_fewshot:-}" ]]; then
     MODEL_ARGS="${MODEL_ARGS},model_a_num_fewshot=${model_a_num_fewshot}"
 fi
@@ -105,6 +106,7 @@ echo "protocol_id=${protocol_id}"
 echo "experiment_name=${experiment_name}"
 echo "task=${task}"
 echo "master_model=${master_model}"
+echo "ctca_shared_token_policy=${ctca_shared_token_policy}"
 echo "source_num_fewshot=${source_num_fewshot}"
 echo "canvas_num_fewshot=${canvas_num_fewshot}"
 echo "model_a_num_fewshot=${model_a_num_fewshot:-inherited}"
@@ -118,7 +120,7 @@ echo "CACHE_PATH=${CACHE_PATH}"
 echo "MODEL_ARGS=${MODEL_ARGS}"
 echo "==========================="
 
-srun --ntasks=1 --nodes=1 accelerate launch --num_processes 1 \
+accelerate launch --num_processes 1 \
     dllm/pipelines/tse/eval.py \
     --tasks "${task}" \
     --num_fewshot "${source_num_fewshot}" \

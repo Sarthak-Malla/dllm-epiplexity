@@ -30,6 +30,52 @@ class RelativeAnchorSelection:
         return int(self.auxiliary_anchor_ids.numel())
 
 
+def preserve_shared_token_rows(
+    top_indices: torch.Tensor,
+    top_weights: torch.Tensor,
+    auxiliary_tokenizer,
+    master_tokenizer,
+    *,
+    master_vocab_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Send each ordinary token shared verbatim to its matching master token.
+
+    Relative-anchor similarities remain the fallback for tokens without an
+    exact shared spelling. Tokenizer special IDs are left for an explicit
+    semantic policy rather than matched by their surface spelling.
+    """
+    if top_indices.shape != top_weights.shape or top_indices.ndim != 2:
+        raise ValueError("top-k indices and weights must have identical 2-D shapes")
+    if top_indices.shape[1] < 1:
+        raise ValueError("top-k projection must contain at least one destination")
+    if master_vocab_size < 1:
+        raise ValueError("master_vocab_size must be positive")
+
+    auxiliary_special = set(getattr(auxiliary_tokenizer, "all_special_ids", []))
+    master_special = set(getattr(master_tokenizer, "all_special_ids", []))
+    master_vocab = master_tokenizer.get_vocab()
+    matches = [
+        (int(auxiliary_id), int(master_vocab[token]))
+        for token, auxiliary_id in auxiliary_tokenizer.get_vocab().items()
+        if token in master_vocab
+        and 0 <= int(auxiliary_id) < top_indices.shape[0]
+        and 0 <= int(master_vocab[token]) < master_vocab_size
+        and int(auxiliary_id) not in auxiliary_special
+        and int(master_vocab[token]) not in master_special
+    ]
+    if not matches:
+        return top_indices, top_weights
+
+    indices = top_indices.clone()
+    weights = top_weights.clone()
+    auxiliary_ids = torch.tensor([pair[0] for pair in matches], dtype=torch.long)
+    master_ids = torch.tensor([pair[1] for pair in matches], dtype=torch.long)
+    indices[auxiliary_ids, 0] = master_ids
+    weights[auxiliary_ids] = 0
+    weights[auxiliary_ids, 0] = 1
+    return indices, weights
+
+
 def collect_relative_anchor_ids(
     auxiliary_tokenizer,
     master_tokenizer,

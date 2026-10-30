@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from dllm.pipelines.tse.ctca.alignment import align_embeddings_procrustes
+from dllm.pipelines.tse.ctca.aligner import CrossTokenizerAligner
 from dllm.pipelines.tse.ctca.cache import CTCACacheManager
 from dllm.pipelines.tse.ctca.canvas import (
     build_canvas_overlap_matrix,
@@ -22,6 +23,7 @@ from dllm.pipelines.tse.ctca.projection import (
 from dllm.pipelines.tse.ctca.relative import (
     build_sparse_topk_relative_anchor_projection,
     collect_relative_anchor_ids,
+    preserve_shared_token_rows,
     project_vocab_relative_exact,
 )
 
@@ -373,6 +375,97 @@ def test_relative_anchor_sparse_maps_matching_tokens_with_unequal_dimensions():
 
     assert top_indices[:2, 0].tolist() == [0, 1]
     assert top_weights.shape == (4, 1)
+
+
+def test_shared_raw_tokens_keep_all_mass_and_nonshared_rows_keep_fallback():
+    auxiliary = ToyTokenizer(
+        ["Ġeats", "Ġ", "nonshared", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    master = ToyTokenizer(
+        ["ĠEats", "3", "Ġeats", "Ġ", "other", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    indices = torch.tensor([[2, 0], [1, 3], [4, 1], [1, 4], [1, 4]])
+    weights = torch.tensor(
+        [[0.5, 0.5], [0.999, 0.001], [0.7, 0.3], [0.6, 0.4], [0.6, 0.4]]
+    )
+
+    corrected_indices, corrected_weights = preserve_shared_token_rows(
+        indices, weights, auxiliary, master, master_vocab_size=7
+    )
+    projected = project_vocab_sparse_topk(
+        torch.tensor([[0.266, 0.200, 0.534, 0.0, 0.0]]),
+        corrected_indices,
+        corrected_weights,
+        master_vocab_size=7,
+    )
+
+    assert corrected_indices[0, 0].item() == master.get_vocab()["Ġeats"]
+    assert corrected_indices[1, 0].item() == master.get_vocab()["Ġ"]
+    assert torch.equal(corrected_weights[:2, 0], torch.ones(2))
+    assert torch.equal(corrected_weights[:2, 1], torch.zeros(2))
+    assert torch.equal(corrected_weights[2:], weights[2:])
+    assert projected[0, master.get_vocab()["Ġeats"]].item() == pytest.approx(0.266)
+    assert projected[0, master.get_vocab()["Ġ"]].item() == pytest.approx(0.200)
+    assert projected[0, master.get_vocab()["ĠEats"]].item() == 0
+
+
+def test_shared_token_override_applies_when_relative_table_is_loaded_from_cache(
+    tmp_path,
+):
+    auxiliary = ToyTokenizer(
+        ["Ġeats", "Ġ", "3", "nonshared", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    master = ToyTokenizer(
+        ["ĠEats", "3", "Ġeats", "Ġ", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    auxiliary_embeddings = torch.eye(6, 3)
+    master_embeddings = torch.eye(6, 3)
+
+    def make_aligner(policy):
+        aligner = CrossTokenizerAligner(
+            master,
+            master_embeddings,
+            master_id="master",
+            cache_dir=tmp_path,
+            shared_token_policy=policy,
+        )
+        aligner.register_auxiliary_model(
+            "aux",
+            auxiliary,
+            auxiliary_embeddings,
+            num_anchors="auto",
+            min_anchors=2,
+            projection_top_k=3,
+        )
+        aligner.warm_projection_cache("aux", torch.device("cpu"))
+        return aligner
+
+    first = make_aligner("relative")
+    second = make_aligner("exact_shared")
+    third = make_aligner("relative")
+    indices, weights = second.auxiliary_models["aux"].sparse_topk_by_device["cpu"]
+    assert first.projection_diagnostics("aux")["sparse_topk_cache_rebuilt"]["cpu"] is True
+    assert (
+        second.projection_diagnostics("aux")["sparse_topk_cache_rebuilt"]["cpu"]
+        is False
+    )
+    assert indices[auxiliary.get_vocab()["Ġeats"], 0] == master.get_vocab()["Ġeats"]
+    assert weights[auxiliary.get_vocab()["Ġeats"], 0] == 1
+    assert indices[auxiliary.get_vocab()["Ġ"], 0] == master.get_vocab()["Ġ"]
+    assert weights[auxiliary.get_vocab()["Ġ"], 0] == 1
+    for old, restored in zip(
+        first.auxiliary_models["aux"].sparse_topk_by_device["cpu"],
+        third.auxiliary_models["aux"].sparse_topk_by_device["cpu"],
+    ):
+        assert torch.equal(old, restored)
 
 
 def test_relative_anchor_sparse_matches_exact_when_topk_covers_vocab():

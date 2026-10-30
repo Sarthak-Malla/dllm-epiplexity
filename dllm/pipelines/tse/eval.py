@@ -168,6 +168,9 @@ class TSEEvalHarness(LM):
             ),
             ctca_chunk_size=int(kwargs.get("ctca_chunk_size", 2500)),
             ctca_projection_mode=kwargs.get("ctca_projection_mode", "sparse_topk"),
+            ctca_shared_token_policy=kwargs.get(
+                "ctca_shared_token_policy", "exact_shared"
+            ),
             ctca_projection_top_k=int(kwargs.get("ctca_projection_top_k", 64)),
             ctca_num_anchors=kwargs.get("ctca_num_anchors", "auto"),
             ctca_min_anchors=int(kwargs.get("ctca_min_anchors", 128)),
@@ -233,6 +236,7 @@ class TSEEvalHarness(LM):
                 projection_temperature=self.config.ctca_projection_temperature,
                 projection_chunk_size=self.config.ctca_chunk_size,
                 projection_mode=self.config.ctca_projection_mode,
+                shared_token_policy=self.config.ctca_shared_token_policy,
                 projection_top_k=self.config.ctca_projection_top_k,
                 num_anchors=self.config.ctca_num_anchors,
                 min_anchors=self.config.ctca_min_anchors,
@@ -314,6 +318,7 @@ class TSEEvalHarness(LM):
             "ctca_anchor_temperature": self.config.ctca_anchor_temperature,
             "ctca_projection_temperature": self.config.ctca_projection_temperature,
             "ctca_projection_mode": self.config.ctca_projection_mode,
+            "ctca_shared_token_policy": self.config.ctca_shared_token_policy,
             "ctca_projection_top_k": self.config.ctca_projection_top_k,
             "ctca_num_anchors": self.config.ctca_num_anchors,
             "ctca_min_anchors": self.config.ctca_min_anchors,

@@ -28,6 +28,7 @@ tse_print_config_file "${CONFIG_PATH}"
 source "${CONFIG_PATH}"
 
 ctca_canvas_workers="${ctca_canvas_workers:-8}"
+ctca_shared_token_policy="${ctca_shared_token_policy:-exact_shared}"
 trace_top_k="${trace_top_k:-5}"
 trace_jsonl="${trace_jsonl:-.logs/ctca-m0-one-question_${SLURM_JOB_ID:-manual}.jsonl}"
 trace_tensors="${trace_tensors:-}"
@@ -109,6 +110,7 @@ echo "ctca_projection_top_k=${ctca_projection_top_k}"
 echo "ctca_num_anchors=${ctca_num_anchors}"
 echo "ctca_min_anchors=${ctca_min_anchors}"
 echo "ctca_canvas_workers=${ctca_canvas_workers}"
+echo "ctca_shared_token_policy=${ctca_shared_token_policy}"
 echo "trace_top_k=${trace_top_k}"
 echo "trace_jsonl=${trace_jsonl}"
 echo "trace_tensors=${trace_tensors}"
@@ -117,7 +119,7 @@ echo "master_begin_suppress_tokens=${master_begin_suppress_tokens}"
 echo "question=${question}"
 echo "================================="
 
-srun nvidia-smi
+nvidia-smi
 
 export PYTHONPATH=".:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
@@ -176,6 +178,7 @@ python scripts/tse/smoke.py \
     --ctca \
     --master-model "${master_model}" \
     --ctca-cache-dir "${ctca_cache_dir}" \
+    --ctca-shared-token-policy "${ctca_shared_token_policy}" \
     --ctca-anchor-temperature "${ctca_anchor_temperature}" \
     --ctca-projection-temperature "${ctca_projection_temperature}" \
     --ctca-chunk-size "${ctca_chunk_size}" \

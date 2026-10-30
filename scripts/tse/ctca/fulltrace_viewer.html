@@ -17,12 +17,16 @@ details { margin-top: 12px; } button { font: inherit; padding: 7px 12px; } .summ
 </style>
 </head>
 <body>
-<h1>CTCA masked-token trace <small class="muted">actual-run loader · 27 Oct</small></h1>
+<h1>CTCA masked-token trace <small class="muted">actual-run loader</small></h1>
 <p class="hint">The latest completed two-question run loads automatically. Before it finishes, the sentence demo appears. Reload or click “Load latest run” after the job completes.</p>
 <div class="toolbar">
 <button id="loadLatest" type="button">Load latest run</button>
+<button id="loadDreamRelative" type="button">Dream relative</button>
+<button id="loadDreamExact" type="button">Dream exact shared</button>
 <label>Server trace URLs (comma separated) <input id="urls" type="text" value="demo_dummy_trace.jsonl"></label>
 <button id="loadUrls" type="button">Load server traces</button>
+<label>Replay manifest URL <input id="replayManifest" type="text" placeholder="/.logs/STUDY_ID/doc23.json"></label>
+<button id="loadReplay" type="button">Load replay pair</button>
 <label>Trace files <input id="files" type="file" accept=".jsonl" multiple></label>
 <label>Question <select id="case"></select></label>
 <label>Decoding step <select id="step"></select></label>
@@ -158,7 +162,43 @@ async function loadServerTraces() {
   }
 }
 async function loadLatestRun() {
-  const manifestUrl = '/.logs/ctca-gsm8k2-fulltrace/latest.json';
+  const manifestSources = [
+    {url: '/.logs/ctca-gsm8k2-dreammaster-exactshared/exactshared/latest.json', label: 'Dream master, exact shared-token projection'},
+    {url: '/.logs/ctca-gsm8k2-dreammaster-exactshared/relative/latest.json', label: 'Dream master, relative projection'},
+    {url: '/.logs/ctca-gsm8k2-fulltrace-exactshared/latest.json', label: 'exact shared-token projection, Dream probability temperature 1.0'},
+    {url: '/.logs/ctca-gsm8k2-fulltrace-ptb1p0/latest.json', label: 'Dream probability temperature 1.0'},
+    {url: '/.logs/ctca-gsm8k2-fulltrace/latest.json', label: 'previous Dream probability temperature 0.1'},
+  ];
+  try {
+    let manifest = null;
+    let selectedSource = null;
+    for (const source of manifestSources) {
+      const response = await fetch(source.url, {cache: 'no-store'});
+      if (!response.ok) continue;
+      const candidate = await response.json();
+      if (Array.isArray(candidate.traces) && candidate.traces.length === 2) {
+        manifest = candidate;
+        selectedSource = source;
+        break;
+      }
+    }
+    if (!manifest) throw new Error('no completed two-question run');
+    $('urls').value = manifest.traces.join(',');
+    await loadServerTraces();
+    if (cases.size === 2) {
+      $('loadStatus').textContent += ` · job ${manifest.job_id} · ${selectedSource.label}`;
+      if (selectedSource !== manifestSources[0]) {
+        $('loadStatus').textContent += ' · latest Dream-master exact trace unavailable';
+      }
+    }
+  } catch (error) {
+    $('urls').value = 'demo_dummy_trace.jsonl';
+    await loadServerTraces();
+    $('loadStatus').textContent += ' · waiting for completed two-question run';
+  }
+}
+async function loadDreamRun(variant) {
+  const manifestUrl = `/.logs/ctca-gsm8k2-dreammaster-exactshared/${variant}/latest.json`;
   try {
     const response = await fetch(manifestUrl, {cache: 'no-store'});
     if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
@@ -168,15 +208,30 @@ async function loadLatestRun() {
     }
     $('urls').value = manifest.traces.join(',');
     await loadServerTraces();
-    if (cases.size === 2) $('loadStatus').textContent += ` · job ${manifest.job_id}`;
+    if (cases.size === 2) $('loadStatus').textContent += ` · job ${manifest.job_id} · Dream ${variant}`;
   } catch (error) {
-    $('urls').value = 'demo_dummy_trace.jsonl';
-    await loadServerTraces();
-    $('loadStatus').textContent += ' · waiting for completed two-question run';
+    $('loadStatus').textContent = `Dream ${variant} trace unavailable: ${error.message}`;
   }
 }
 $('loadLatest').addEventListener('click', loadLatestRun);
+$('loadDreamRelative').addEventListener('click', () => loadDreamRun('relative'));
+$('loadDreamExact').addEventListener('click', () => loadDreamRun('exactshared'));
 $('loadUrls').addEventListener('click', loadServerTraces);
+async function loadReplay() {
+  try {
+    const url = new URL($('replayManifest').value, location.href);
+    if (url.origin !== location.origin) throw new Error('Manifest must be on this server');
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const manifest = await response.json();
+    if (!Array.isArray(manifest.traces) || manifest.traces.length !== 2) throw new Error('Expected an ensemble/endpoint pair');
+    $('urls').value = manifest.traces.join(',');
+    await loadServerTraces();
+    const checks = (manifest.reproduction || []).map(x => `${x.condition}: ${x.matches_original_response ? 'reproduced' : 'DIFFERS from benchmark'}`).join(' · ');
+    $('loadStatus').textContent += ` · job ${manifest.job_id} · ${checks}`;
+  } catch (error) { $('loadStatus').textContent = `Replay unavailable: ${error.message}`; }
+}
+$('loadReplay').addEventListener('click', loadReplay);
 $('files').addEventListener('change', async event => {
   cases.clear(); $('content').textContent = 'Loading traces…';
   for (const file of event.target.files) addTrace(file.name, await file.text());
@@ -188,7 +243,11 @@ $('position').addEventListener('change', render);
 $('limit').addEventListener('input', render);
 $('masterWeight').addEventListener('input', () => { weightTouched = true; render(); });
 $('resetWeight').addEventListener('click', () => { weightTouched = false; render(); });
-if (location.protocol === 'http:' || location.protocol === 'https:') loadLatestRun();
+if (location.protocol === 'http:' || location.protocol === 'https:') {
+  const manifest = new URLSearchParams(location.search).get('manifest');
+  if (manifest) { $('replayManifest').value = manifest; loadReplay(); }
+  else loadLatestRun();
+}
 </script>
 </body>
 </html>

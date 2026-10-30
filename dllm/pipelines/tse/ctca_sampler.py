@@ -57,6 +57,7 @@ class CTCATSESampler:
         auxiliary_id: str,
         cache_dir: str | None = ".cache/ctca",
         force_rebuild: bool = False,
+        shared_token_policy: str = "exact_shared",
         anchor_temperature: float = 0.01,
         projection_temperature: float = 0.05,
         projection_chunk_size: int = 2500,
@@ -101,6 +102,7 @@ class CTCATSESampler:
                 master_id=master_cache_id or master_id,
                 cache_dir=cache_dir,
                 force_rebuild=force_rebuild,
+                shared_token_policy=shared_token_policy,
             )
             self.aligner.register_auxiliary_model(
                 auxiliary_cache_id or auxiliary_id,
