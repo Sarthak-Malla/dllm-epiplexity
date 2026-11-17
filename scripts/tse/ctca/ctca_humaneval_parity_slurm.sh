@@ -18,5 +18,5 @@ cd "${SLURM_SUBMIT_DIR}"
 source scripts/tse/run_logging.sh
 tse_print_run_context "$0"
 
-exec bash scripts/tse/ctca/ctca_parity_eval.sh \
-    scripts/tse/configs/ctca_humaneval_parity.conf
+CONFIG_PATH="${1:-scripts/tse/configs/ctca_humaneval_parity.conf}"
+exec bash scripts/tse/ctca/ctca_parity_eval.sh "${CONFIG_PATH}"

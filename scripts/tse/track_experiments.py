@@ -106,7 +106,25 @@ PROTOCOL_REQUIREMENTS = {
         "num_fewshot": 5,
         "metadata": {"max_new_tokens": 512, "steps": 128},
     },
+    "ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
+    "ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1": {
+        "task": "gsm8k_cot",
+        "samples": 300,
+        "num_fewshot": 5,  # Harness bank: LLaDA uses five, Dream selects zero.
+        "metadata": {"max_new_tokens": 512, "steps": 128},
+    },
     "ctca-humaneval-v1": {
+        "task": "humaneval_instruct",
+        "samples": 164,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 768, "steps": 192},
+    },
+    "ctca-humaneval-exactshared-v1": {
         "task": "humaneval_instruct",
         "samples": 164,
         "num_fewshot": 0,

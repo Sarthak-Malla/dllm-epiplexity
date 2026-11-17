@@ -99,6 +99,28 @@ a protocol change and investigate before comparison.
 
 ## Naming convention
 
+### Planned GSM8K300 CTCA agreement ranking (2026-11-17)
+
+User-approved paired LLaDA-master and Dream-master runs use
+`remasking="consensus"`: fused top-token probability multiplied by
+JS agreement (`1 - weighted_JS / weight_entropy`, clamped to [0, 1]).
+This changes the order of committed positions; greedy fused token proposals,
+512-token / 128-step / 32-token-block schedule, static alpha 0.5, probability
+temperatures 1.0/1.0, LLaDA five-shot / Dream zero-shot prompts, batch size 8,
+suppression, and exact-shared sparse projection remain inherited from the
+matching at0p03/pt0p10 confidence controls. Projection uses all shared anchors
+and top-k 64. The two planned records in
+[`experiments.json`](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/experiments.json)
+use protocol `ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1`
+and separate response caches. No scheduler jobs have been submitted.
+
+- LLaDA config: `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_lladamaster_jsrank_at0p03_pt0p10.conf`.
+- Dream config: `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_dreammaster_jsrank_at0p03_pt0p10.conf`.
+- Submit LLaDA: `sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_lladamaster_jsrank_at0p03_pt0p10_slurm.sh`.
+- Submit Dream: `sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_dreammaster_jsrank_at0p03_pt0p10_slurm.sh`.
+
+### Experiment ID format
+
 Experiment IDs must identify the characteristics that change the scientific
 behavior of the run:
 
@@ -225,6 +247,9 @@ only after their immutable config files exist.
   comparable and are excluded from this protocol.
 - Prompting: zero-shot; code execution must be explicitly enabled through the
   harness safety flag.
+- Evaluation batch size: `4` for LLaDA, Dream, and CTCA. The initial LLaDA
+  batch-size-8 attempt ran out of memory at 128/164 problems; use the same
+  batch size for every HumanEval condition.
 - Generation: `max_new_tokens=768`, `steps=192`, `block_size=32` (24 blocks,
   8 refinement steps per block).
 - Suppression by active output tokenizer:
@@ -242,6 +267,30 @@ only after their immutable config files exist.
   - `ctca-humaneval-llada8bi-single-t1p0-nativeprob-confrank-20261015`
   - `ctca-humaneval-dream7bi-single-t1p0-nativeprob-confrank-20261015`
   - `ctca-humaneval-llada8bi-dream7bi-dreammaster-ens-t1p0-t1p0-w0p5-probmean-confrank-20261015`
+
+### `ctca-humaneval-exactshared-v1`
+
+This follow-up evaluates the exact-shared projection and both fusion endpoints
+on the same 164 HumanEval problems, common zero-shot `humaneval_instruct`
+prompts, and 768/192/32 decoding schedule. It matches jobs `352346` and
+`352347` in master direction, static 50/50 probability fusion, and
+`temperature_a=temperature_b=1.0`. It also runs alpha 1.0 with LLaDA as master
+and alpha 0.0 with Dream as master, analogous to endpoint jobs `350508` and
+`352165`. Both models remain loaded in endpoint runs. All four use the exact
+shared-token policy, model-owned HumanEval EOS suppression, deterministic
+confidence ranking, and the required code-evaluation safety flag. The endpoint
+comparisons are against the matching master direction.
+All four runs use batch size 4, matching the HumanEval single-model controls.
+
+- Configs:
+  - `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_lladamaster_exactshared.conf`
+  - `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_dreammaster_exactshared.conf`
+  - `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_lladamaster_alpha1_endpoint.conf`
+  - `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_dreammaster_alpha0_endpoint.conf`
+- Submission wrapper:
+  `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_humaneval_parity_slurm.sh`
+- Submit each condition by passing its config path to the wrapper; the wrapper
+  defaults to the original Dream-master parity config when no argument is given.
 
 ### CTCA-only settings
 
@@ -851,10 +900,538 @@ original and replay response plus a reproduction flag; a mismatch prevents
 claiming that its trace explains the original benchmark trajectory.
 
 Submission wrapper: `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh STUDY_ID`.
-The proposed study ID `ctca-gsm8k4-benchmark-replay-20261029` awaits naming
-confirmation. The wrapper excludes gpu-38, gpu-51, and gpu-24. The viewer
+The study ID is `ctca-gsm8k4-benchmark-replay-20261029`; job 352946 produced
+all four pairs. The wrapper excludes gpu-38, gpu-51, and gpu-24. The viewer
 `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/fulltrace_viewer.html`
 accepts `?manifest=/.logs/STUDY_ID/doc23.json` (or doc18, doc9, doc11) and displays
 both traces and reproduction flags. Each pair becomes available when completed;
 `latest.json` points to the last completed pair. No scheduler job was submitted
 by the agent.
+
+The CPU-only span audit `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/span_audit.py --study-id
+ctca-gsm8k4-benchmark-replay-20261029` reads saved top-64 traces and writes
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-benchmark-replay-20261029/span_audit.json`. Probability
+products are parallel approximations, not model rescoring. In doc 23 at step
+0.0, the trace contains a text-exact Dream candidate ` cent` + `imeters` in
+slots 69–70, with native master probability product about 0.0010. Slot 70
+committed ` every` at step 0.0, so this span was blocked when slot 69 committed
+` kilometers` at step 0.2. The audit separates the wrong one-token projection
+from this earlier commitment constraint.
+The audit's illustrative equal-weight span score for ` cent` + `imeters` at
+step 0.0 is 0.277, below the weakest of the four actual committed single-slot
+scores (0.356). Simply adding the span to the existing greedy candidate list
+would therefore leave this failure unchanged; a decoder intervention needs a
+separate span-ranking or slot-reservation policy and live model replay.
+Across all four ensemble traces, high-confidence non-special source tokens
+whose projected top text differs from the source occur at two selected
+positions in doc 23 (both `centimeters` -> `kilometers`), zero in docs 18 and
+9, and nine in doc 11 (punctuation/newline fragments). Thus, span scoring
+targets a real projection defect but does not address the exact-token errors
+that start the egg and overtime failures. Treat projection and commitment
+quality as separate experimental axes.
+An offline tokenizer-wide representability check found exact round-trip
+spellings of length at most three tokens for 125,658/126,349 ordinary LLaDA
+tokens in Dream (99.45%) and 142,881/151,643 ordinary Dream tokens in LLaDA
+(94.22%). These are vocabulary counts, not probability-weighted coverage;
+standalone token decoding may also differ from decoding in context.
+Among selected ordinary auxiliary top predictions in the four replays, only
+2/57 (doc 23), 0/98 (doc 18), 0/510 (doc 9), and 10/255 (doc 11) require two
+or three master tokens to reproduce their text. This confirms broad vocabulary
+representability but a much smaller impact on these actual decisions.
+
+### Cross-tokenizer method review
+
+Inference-time Agreement-Based Ensembling compares model outputs by their
+surface strings and tracks when one autoregressive tokenizer trails another
+(Wicks et al., 2025, https://arxiv.org/abs/2502.21265). Exact byte-level
+probability conversion supports heterogeneous autoregressive model ensembles
+(Phan et al., 2025, https://arxiv.org/abs/2410.09303), but its next-byte
+factorization does not directly apply to out-of-order masked diffusion.
+SweetSpan proposes candidate text spans and cross-scores them with each model
+(Xu et al., 2025, https://arxiv.org/abs/2409.18583). UnMaskFork retokenizes
+committed text when switching between masked diffusion models, including Dream
+and LLaDA (Misaki and Akiba, 2026, https://arxiv.org/abs/2602.04344), but does
+not solve probability-level fusion. The most promising CTCA adaptation is
+therefore native-tokenizer candidate generation followed by mutual scoring of
+the same completed text on each model's masked canvas. This is a research
+direction, not a validated decoder change; first test candidate coverage,
+score calibration, slot feasibility, and compute cost offline before a new
+GSM8K run.
+
+### Native text-span rescoring diagnostic
+
+The diagnostic `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/native_span_rescore.py` reads the completed
+four-question replay and reconstructs each saved master canvas from its prompt
+and preceding commits. At six checkpoints across docs 23, 18, 9, and 11, it
+collects the top eight native candidates from each model, deduplicates their
+decoded text, and retokenizes each candidate in both native vocabularies. It
+reports exact round-trip representability and whether all required master
+slots remain free. For feasible candidates, each model scores its native token
+sequence at the masked positions on its own canvas; the report uses mean log
+probability within each model and an equal-weight mean across models. This is a
+parallel masked-token pseudo-score, not an exact joint span probability. It
+does not change commitment timing or perform decoding.
+
+The approved study ID is `ctca-gsm8k4-native-span-rescore-20261030`. The
+launcher is `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_native_span_rescore_slurm.sh STUDY_ID`; it
+excludes gpu-38, gpu-51, and gpu-24. Its GPU output is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/STUDY_ID/rescore.json`. The CPU preparation output is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/STUDY_ID/prepared.json`. CPU validation found 69/76 candidate strings
+feasible across six checkpoints. In doc 23, ` centimeters` is available at
+step 0.0 with Dream IDs `[2889, 54236]` and LLaDA ID `[88161]`, but its second
+Dream slot is occupied by step 0.2. These checks establish candidate coverage
+and slot feasibility only; they do not measure an accuracy gain.
+The saved trace contains committed token text rather than token IDs, so the
+reconstruction re-encodes each committed token as one native master token.
+The CPU validation passed for these six checkpoints, but the reconstruction
+cannot guarantee original IDs when distinct IDs decode to the same text.
+Compare the scored rankings with the original selected tokens and native
+top candidates before considering a decoder prototype.
+
+Job 354090 completed on gpu-17 and wrote `rescore.json`. The maximum absolute
+gap between a replayed native master top-token probability and its saved trace
+value is 1.7e-8 across the six checkpoints, supporting faithful canvas
+reconstruction for these examples. The per-checkpoint model-forward time was
+roughly 0.5–1.0 seconds for both models combined, excluding loading and canvas
+work. The measured rankings are diagnostic, not accuracy results:
+
+- Doc 23 step 0.0, position 69: ` centimeters` ranks first by mean token log
+  probability across models (-2.049), ahead of `:` (-2.335). Its Dream native
+  representation has two tokens, however. Using each model's **sum** of token
+  log probabilities instead ranks `:` above ` centimeters` (-2.335 versus
+  -3.773), so the ranking is sensitive to length normalization. At this step
+  the actual scheduler selected positions 64, 67, 70, and 71; position 69 was
+  eighth by original fused confidence, and position 70 committed ` every`.
+  By step 0.2, when position 69 committed the projected ` kilometers`, the
+  correct two-slot candidate was infeasible.
+- Doc 11 step 1.3, position 541: Dream's top candidate was `.` followed by
+  newline as one Dream token with probability 0.9863. LLaDA needs two tokens
+  for that text, but position 542
+  had committed a two-space token at step 1.2. Thus the candidate was
+  infeasible; the best feasible candidate was newline, supported strongly by
+  LLaDA and weakly by Dream. This is a second, independent instance of
+  commitment blocking a cross-tokenizer span.
+- Doc 18 step 0.0: the erroneous `3` ranks first under native rescoring.
+  Doc 9 step 1.0: the repeated ` overtime` ranks first, only slightly above
+  ` pay` (-2.210 versus -2.272). Doc 11 step 0.0 keeps the original `To`.
+
+Native rescoring therefore validates a way to compare feasible strings across
+tokenizers, but it does not by itself repair the observed decoding errors.
+The next investigation should test a variable-width candidate selection rule
+that reserves all slots of a chosen surface span while retaining the same
+per-step token commitment budget, and evaluate calibration across both losses
+and ensemble gains. A semantic completion such as ` traj` to ` trajectory`
+is outside exact-surface matching and requires explicit candidate generation.
+
+### Schedule-preserving span reservation audit
+
+The approved CPU study ID `ctca-gsm8k4-span-budget-20261030` runs
+`/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/span_reservation_audit.py` on the four saved ensemble traces.
+It proposes protection for a top auxiliary string with probability at least
+0.4 when that string exactly retokenizes to two or three currently free master
+slots. A selector excludes protected slots from that step's rank list and
+fills the same commitment budget from the highest remaining positions. It
+rejects a proposed protection if too few positions remain. The output is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-span-budget-20261030/reservation_audit.json`. This is an
+offline counterfactual: after the first changed commitment, later recorded
+states do not represent the protected trajectory.
+
+On the recorded states, doc 23 has four candidate protections, two of which
+would displace a commitment. At step 0.0, protection of positions 69–70 for
+` centimeters` would replace the commitment of ` every` at position 70 with
+`2` at position 68 while still committing four positions. Doc 11 has 30
+proposals across 25 steps; 29 fit the schedule and 10 original commitments
+would be displaced after enforcing budget feasibility. At step 1.2 it would
+protect positions 541–542 for Dream's `.` plus newline. Docs 18 and 9 have no
+qualifying spans. These counts indicate that naive protection changes many
+formatting decisions and cannot address the egg or overtime failures.
+Increasing the threshold to 0.95 misses both early protections needed in
+docs 23 and 11, so a simple confidence cutoff does not isolate the desired
+cases. Protection alone also does not decide which text to commit later.
+Do not add it to the live decoder until a calibrated span score and release
+rule are tested.
+
+The follow-up conditional score check adds model forwards after inserting the
+earlier native tokens of a candidate span. It tests whether a parallel masked
+product substantially understates multi-token candidates. The added
+pre-blocking checkpoint is doc 11 step 1.2; doc 23 is scoreable at step 0.0,
+but its second slot is already blocked by step 0.1. The score remains a
+masked-diffusion pseudo-conditional rather than an exact joint probability.
+The prepared ID is `ctca-gsm8k4-conditional-span-20261030`; the name was sent
+to the user for selection. The CPU preparation passed for eight checkpoints
+and wrote `/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-conditional-span-20261030/prepared.json`.
+The GPU diagnostic command was
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_native_span_rescore_slurm.sh ctca-gsm8k4-conditional-span-20261030 --conditional`.
+It wrote `rescore.json` under that study directory, including the
+parallel and conditional scores, conditional rank, extra forward time, and
+native master replay probability checks. The previously completed six-point
+parallel-score study remains separate.
+
+Job 354818 completed on gpu-62 and wrote the eight-checkpoint conditional
+report. Saved versus replayed master top probabilities differ by at most
+2.1e-8. In doc 23 step 0.0, ` centimeters` improves from parallel mean log
+score -2.049 to conditional -1.033. Dream's conditional two-token product
+probability is 0.05875 and LLaDA's one-token probability is 0.52220;
+their equal-weight arithmetic event probability is 0.29048. At doc 11 step
+1.2, Dream's `.` plus newline improves from -2.720 to -1.568 in mean log
+score; LLaDA's conditional product is 0.01087 and Dream's
+one-token probability is 0.41700, giving arithmetic event probability
+0.21394. In both cases, the second native token becomes highly likely once
+the first is inserted. Extra forward time was 0.23 seconds for doc 23 and
+0.29 seconds for doc 11, on top of the original two model forwards.
+
+These approximate event probabilities remain below the original single-position commit
+cutoffs (about 0.356 in doc 23 step 0.0 and 0.652 in doc 11 step 1.2).
+The mean-token score can rank a multi-token string higher, but this score
+is sensitive to span length and is not directly comparable to the decoder's
+single-token fused confidence. The erroneous one-token candidates `3` and
+` overtime` remain first in docs 18 and 9. Do not treat the conditional
+ranking alone as evidence that live span commitment would improve accuracy.
+
+The next calibration set should include ensemble gains as well as losses.
+The replay driver now accepts repeated `--case DOC:MASTER` arguments. A CPU
+preparation of doc 3 with LLaDA master and doc 6 with Dream master passed
+document identity and native prompt equality checks against the matching
+endpoints. The proposed study ID is `ctca-gsm8k2-gain-replay-20261104`,
+pending user name selection. Its command is
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k2-gain-replay-20261104 --case 3:a --case 6:b`.
+The wrapper has a one-hour allocation, following the current job limit.
+After checking whether batch-one replay reproduces each 300-question output,
+compare projection mismatches, candidate spans, commitment conflicts, and
+conditional scores on both gains and losses before choosing a live decoder
+rule. Retain the 512/128/32 schedule and four-token step budget in that rule.
+
+The user submitted the gain replay as job 367862. It stopped before generating
+the first trace: LLaDA model construction on `cuda:0` raised CUDA out of
+memory in `nn.Embedding`. The CUDA preflight had confirmed two A100 40 GiB
+devices but had not recorded free memory, so the log cannot establish whether
+another process occupied the allocated GPU or model loading had a transient
+peak. The job wrote no replay manifest, and doc 6 was not attempted. The
+replay wrapper now logs the Slurm node and requires at least 30 GiB free on
+each visible GPU before model loading. The same study ID can be retried;
+each submission writes into its own Slurm job directory.
+
+Retry job 367881 landed on gpu-41 and failed in CUDA preflight before model
+loading: `torch.cuda.mem_get_info(0)` raised CUDA out of memory, despite two
+A100 devices being visible. No gain trace or manifest was produced. The
+replay launcher now excludes gpu-41 as well as gpu-38, gpu-51, and gpu-24,
+prints node GPU memory through `nvidia-smi`, and reports PyTorch memory-query
+failures explicitly. The next retry should use the same study ID and case
+arguments; its separate Slurm job directory preserves both failed attempts.
+
+Job 367906 completed on gpu-59. Its preflight recorded about 39.08 GiB free
+on each assigned A100 and all four traces were written. The doc 3 LLaDA-master
+ensemble and doc 6 Dream-master ensemble replays each match their original
+300-question response exactly and give the correct numerical answer (540 and
+260). Neither endpoint replay matches its original benchmark response: the
+original endpoint answers were 180 and 2260, whereas both batch-one endpoint
+replays give the correct numbers 540 and 260. Thus the saved ensemble traces
+describe real benchmark gain trajectories, but the paired endpoint traces
+cannot establish what changed the endpoint trajectory.
+
+The CPU span audit of these gain ensemble traces found one selected high
+confidence non-special projection mismatch in each. Doc 3 step 0.7 has Dream
+`.\n` (probability 0.979) projected to LLaDA newline, while LLaDA commits
+period; the exact two-token `.` plus newline remains possible at that step.
+Doc 6 step 0.6 has LLaDA ` Toul` (probability 0.994) projected to Dream
+`stras`, and Dream commits `stras` into the malformed city name
+`strasouse`; its exact Dream spelling is ` T` plus `oul` across two free
+slots. Both examples show projection defects even in numerically correct
+ensemble responses.
+
+The offline reservation audit for the gain traces proposes three protections
+in doc 3; none would displace an original commitment, and the last is
+rejected to preserve the four-token budget. It proposes one protection in doc
+6, for ` Toul`, which would displace two original commitments and substitute
+two others. That counterfactual might improve the city spelling, but it
+changes a successful trajectory and needs a live replay before any quality
+claim. The audit report is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k2-gain-replay-20261104/reservation_audit.json`.
+
+CPU preparation for a conditional score check on the gain traces passed at
+doc 3 step 0.7 position 500 and doc 6 step 0.6 position 88. Dream's `.\n`
+round-trips as LLaDA IDs `[13, 198]` and Dream ID `[624]`; LLaDA's ` Toul`
+round-trips as Dream IDs `[350, 10965]` and LLaDA ID `[122895]`. All required
+slots are free at those checkpoints. The prepared report is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k2-gain-replay-20261104/prepared.json`. The GPU check can
+reuse this study ID and run the native scorer with `--source-study-id`
+set to the same gain study, two explicit `--checkpoint` arguments, and
+`--conditional`. This compares score behavior at successful trajectories
+without generating a new answer or changing the decoder.
+The command is
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_native_span_rescore_slurm.sh ctca-gsm8k2-gain-replay-20261104 --source-study-id ctca-gsm8k2-gain-replay-20261104 --checkpoint 3:0.7:500 --checkpoint 6:0.6:88 --conditional`.
+The scorer launcher has a one-hour limit, checks for 30 GiB free per GPU, and
+excludes gpu-24, gpu-38, gpu-41, and gpu-51.
+
+### Balanced ensemble trajectory sample
+
+The approved study ID `ctca-gsm8k4-balanced-ensembletrace-20261104` adds four
+ensemble-only full traces from the same GSM8K-300 benchmark protocol. Gains
+are doc 13 with LLaDA master and doc 15 with Dream master; losses are doc 5
+with LLaDA master and doc 19 with Dream master. The original benchmark
+endpoint outcomes identify gain or loss, while the replay reproduction flag
+determines whether each new batch-one trace can explain its benchmark
+ensemble trajectory. The driver accepts `--condition ensemble` so the study
+does not spend GPU time on endpoint replays that failed to reproduce in the
+previous gain study. CPU preparation checked document identity and native
+prompt equality for all four cases. Two independent two-case Slurm jobs may
+run concurrently under this study ID; each writes its own job directory and
+different document manifests. The launcher has a one-hour limit and excludes
+gpu-24, gpu-38, gpu-41, and gpu-51. The full-trace viewer accepts single-trace
+replay manifests for these cases.
+
+Gain pair command:
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-balanced-ensembletrace-20261104 --case 13:a --case 15:b --condition ensemble`.
+Loss pair command:
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-balanced-ensembletrace-20261104 --case 5:a --case 19:b --condition ensemble`.
+After completion, compare the two loss and two gain ensemble traces with the
+existing four loss and two gain traces. Check exact replay reproduction first,
+then count high-confidence projection mismatches, blocked exact spans, and
+counterfactual reservation conflicts. Use conditional native scoring only for
+positions where a multi-token candidate is feasible and decision-relevant.
+
+### Distribution-level relative-space projection: `ctca-gsm8k4-relative-distribution-20261104`
+
+Approved projection-only comparison. The new optional
+`ctca_projection_mode=relative_distribution` leaves the existing `sparse_topk`
+and `exact` modes and their defaults intact. It represents each ordinary token
+by a softmax-normalized vector of cosine similarities to shared-token anchors.
+For each already spatially warped auxiliary distribution, it averages these
+vectors by auxiliary probability, retrieves up to 512 candidate master tokens
+(global profile matches plus neighbors of up to eight source tokens carrying at
+least 5% of residual probability), and runs 20 multiplicative mixture updates
+to match that average. Residual mass at or below `1e-4` is omitted and the
+output renormalized. The master
+distribution is not an input to this projection; the existing CTCA probability
+fusion and four-slot schedule remain unchanged. `exact_shared` still copies
+ordinary shared-token mass directly. The new profile cache is separate from
+the existing sparse mapping cache. The 2048-anchor pilot set that count
+explicitly for both methods. After the pilot, `num_anchors=auto` was changed to
+select the full shared-anchor set. For more than 2048 anchors, the distribution
+projector now builds half-precision profile tables in vocabulary chunks, stores
+them as memory-mapped `.npy` files in the CTCA cache, and streams chunks during
+projection; candidate fitting processes positions individually. This removes
+the full-table GPU memory requirement but creates roughly 30 GiB of cache for
+the LLaDA/Dream pair and has not yet been timed on a GPU. It preserves the
+whole-distribution calculation and all-anchor search. A small case matched the
+dense projector numerically, including cache reload, and the focused CTCA
+tests passed (41/41). This is a projection diagnostic, not a span scorer.
+
+Use reproducible GSM8K gains (doc 3, LLaDA master; doc 6, Dream master) and
+losses (doc 11, LLaDA master; doc 23, Dream master). The replay driver accepts
+`--projection-mode` and `--num-anchors` and saves mode-specific manifests so
+both conditions can coexist. The following commands are for the user to run;
+the agent must not submit jobs:
+
+`sbatch --time=03:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 3:a --case 6:b --condition ensemble --projection-mode sparse_topk --num-anchors 2048`
+
+`sbatch --time=03:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 3:a --case 6:b --condition ensemble --projection-mode relative_distribution --num-anchors 2048`
+
+`sbatch --time=03:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 11:a --case 23:b --condition ensemble --projection-mode sparse_topk --num-anchors 2048`
+
+`sbatch --time=03:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 11:a --case 23:b --condition ensemble --projection-mode relative_distribution --num-anchors 2048`
+
+Inspect `/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-relative-distribution-20261104/doc<DOC>-<MODE>-2048.json`
+in the full-trace viewer. Compare known wrong projection events, selected
+tokens, full response correctness, per-position inverse-fit KL and top-source
+coverage, and wall time. Run `TSE_TIMERS=1` in a diagnostic job if detailed
+projection timing is needed. Only proceed to matched GSM8K-300 jobs after the
+trace cost and stability are acceptable; the native endpoints and CTCA
+schedule should remain fixed across that comparison.
+
+### Old sparse projection temperature sweep: `ctca-gsm8k4-anchor-projection-temp-sweep-20261104`
+
+The user approved this study ID for hyperparameter tuning of the existing
+`sparse_topk` relative-anchor projector, separate from the new distribution
+projector. Four selected ensemble checkpoints include two losses (doc 23
+Dream-master ` centimeters` -> ` kilometers` at step 0.2, position 69; doc 11
+LLaDA-master `.` plus newline at step 1.3, position 541) and two gains (doc 3
+LLaDA-master `.` plus newline at step 0.7, position 500; doc 6 Dream-master
+` Toul` -> `stras` at step 0.6, position 88).
+
+The CPU script `/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/projection_temperature_sweep.py`
+reweights the existing cached top-64 rows at projection temperatures 0.01,
+0.025, 0.05, 0.1, and 0.2. It combines the top spatial auxiliary token with
+the saved top-64 master probabilities. Its report is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-anchor-projection-temp-sweep-20261104/cached_projection_temperature.json`.
+The result is a local counterfactual only: omitted auxiliary and master mass
+is bounded in the report, but other source tokens, position selection,
+subsequent decoding, and a new full-vocabulary top-k search are not replayed.
+
+At the centimeter event, the estimated fused winner stays ` kilometers`
+through temperature 0.1 and becomes ` cm` at 0.2. At the Toul event it stays
+`stras` through 0.1 and becomes ` T` at 0.2. In both events the source token's
+highest-weight destination remains the wrong one; the warmer projection only
+reduces its dominance enough for a different fused decision. Both punctuation
+events retain their original estimated winner over this sweep. These results
+do not yet show a better completed answer or a corrected cross-tokenizer map.
+
+The CPU script
+`/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/anchor_temperature_sweep.py`
+loaded only cached embedding matrices, reconstructed the same 57,909 shared
+anchors, and sweeps anchor temperatures 0.003, 0.01, 0.03, and 0.1. For each
+checkpoint it compares the original top-64 master destinations plus explicit
+same-text candidates, at projection temperatures 0.05, 0.1, and 0.2. The
+baseline cell matched the cached top-64 weights within `2.3e-8` in all four
+cases. This is a restricted-candidate diagnostic; different anchor
+temperatures could introduce other top-64 destinations in a full rebuild.
+The script wrote
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-anchor-projection-temp-sweep-20261104/restricted_anchor_temperature_grid.json`.
+At anchor temperature 0.03, ` cent` moves from rank 65 to rank 13 among the
+fixed centimeter candidates, but ` kilometers` still leads. Dream's ` T`
+remains rank 65 for the Toul source and LLaDA's period remains rank 65 for
+Dream's period-plus-newline source. At 0.1 the top mapped destinations for
+the centimeter and Toul source tokens become unrelated tokens, indicating
+that increasing anchor temperature indiscriminately can worsen alignment.
+The local fused winner becomes ` cm` for the centimeter case at anchor 0.03
+and projection 0.1 or 0.2, and ` T` for Toul at the same pairs. Both are
+fragments or abbreviations, not evidence of correct completed text. No GPU
+job was necessary. These local counterfactuals do not establish GSM8K accuracy
+or the effect on a full decoding trajectory.
+
+### Tuned sparse-anchor GSM8K-300 pair
+
+The user approved two 300-question runs with the existing `sparse_topk`
+projector at `ctca_anchor_temperature=0.03` and
+`ctca_projection_temperature=0.10`:
+`ctca-gsm8k300-lladamaster-at0p03-pt0p10-20261104` and
+`ctca-gsm8k300-dreammaster-at0p03-pt0p10-20261104`. Their shared protocol ID
+is `ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1`. Both inherit their
+respective earlier exact-shared, Dream-probability-temperature-1.0 GSM8K-300
+configs and retain the same prompts, first 300 examples, batch size 8,
+512/128/32 schedule, four commits per step, static 50/50 fusion, 64 projected
+destinations, all 57,909 anchors, and exact-shared-token override. Changing
+both temperatures together tests the combined configuration; it does not
+identify which temperature caused an accuracy change. Baselines are the
+previous matched runs, jobs `352346` (LLaDA master, 187/300 flexible EM) and
+`352347` (Dream master, 194/300 flexible EM).
+
+The new cache metadata differs from the prior cache in both temperatures, so
+each master direction will rebuild its sparse projection table before
+evaluation. A previous full-anchor table build took 1,423.6 seconds in job
+`350507`; the two new jobs have 12-hour limits. Separate run IDs and cache
+paths avoid reusing prior lm-eval responses. The Slurm wrappers exclude the
+known faulty gpu-38 as well as gpu-24, gpu-41, and gpu-51. The agent must not
+submit Slurm jobs. User commands:
+
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_lladamaster_at0p03_pt0p10_slurm.sh`
+
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_dreammaster_at0p03_pt0p10_slurm.sh`
+
+After completion, compare flexible and strict GSM8K exact match, per-question
+gain/loss overlap, malformed-output counts, and cache-build timing against
+the two baseline jobs. These benchmark jobs do not produce full traces; use
+targeted replay only if a question-level difference needs explanation.
+
+### Results of jobs 368499, 368508, and 368509
+
+Job `368499` completed the conditional native-span rescore for the two
+reproduced ensemble gain checkpoints in job `367906`. Its report is
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k2-gain-replay-20261104/rescore.json`.
+The replayed master top probabilities match the saved trace within `3e-8`.
+At doc 3 step 0.7 position 500, the shared-text candidate `.` plus newline
+(Dream one token, LLaDA two) ranks first among 13 candidates under the
+conditional mean-log score (`-0.658`), ahead of the single period (`-2.448`).
+At doc 6 step 0.6 position 88, ` Toul` (LLaDA one token, Dream two) ranks
+first among 11 (`-2.094`), while ` T` ranks fourth (`-5.154`). These rankings
+show that native-tokenizer span scoring can recover same-text candidates that
+the current projection missed. They are not calibrated commit scores and do
+not establish that changing those successful benchmark trajectories improves
+the final answer. The Dream conditional joint log probability of ` Toul` is
+lower than its parallel pseudo-score, so score definition matters.
+
+Jobs `368508` and `368509` both completed two ensemble-only full traces under
+`ctca-gsm8k4-balanced-ensembletrace-20261104`. None of the four batch-one
+replays reproduces its original batch-eight benchmark response; the first
+text differences occur before trailing special-token padding. The originally
+correct doc 13 (LLaDA master, gold 18) replay ends in repeated LaTeX slashes
+without a final answer; originally correct doc 15 (Dream master, gold 125)
+replay gives 2971. The originally incorrect doc 5 (LLaDA master, gold 64)
+replay loops over glasses and truncates before an answer; originally incorrect
+doc 19 (Dream master, gold 6) replay gives 1 rather than the benchmark's 3.
+These traces are valid independent decoding examples, but they cannot explain
+the specific GSM8K-300 gains or losses they were chosen to study.
+
+A CPU-only span audit of the four new traces is stored at
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-balanced-ensembletrace-20261104/span_audit.json`.
+Selected high-confidence non-special source tokens whose top projected text
+differs occur eight times in doc 5, twice in doc 13, and zero times in docs
+15 and 19. All ten are punctuation/newline multi-token spellings, with exact
+master-token spans available in the saved top-64 candidates. The mismatches
+do not by themselves explain arithmetic errors or final-answer quality; in
+particular, neither doc 15 nor doc 19 has such a selected mismatch. The audit
+uses parallel saved probabilities and cannot validate a live span-commit rule.
+
+### One-example distribution-projection pilot
+
+Before running the four-case `ctca-gsm8k4-relative-distribution-20261104`
+study, start with GSM8K doc 23, Dream master. Its previous full-anchor
+ensemble replay from job `352946` reproduced the benchmark response and
+committed ` kilometers` when LLaDA's top auxiliary token was
+` centimeters`. Run the new `relative_distribution` mode and the existing
+`sparse_topk` control on the same saved native prompts, with 2048 shared
+anchors, exact-shared-token policy, 512/128/32 decoding schedule,
+`temperature_a=temperature_b=1.0`, and static 50/50 fusion. The reduced anchor
+count is necessary for the new mode's dense profile matrices; it is identical
+in both pilot conditions, so the comparison isolates projection method. It
+does differ from the earlier 57,909-anchor benchmark replay. Both pilot
+commands passed CPU preparation. The original doc-23 sampler took about
+317 seconds; use the launcher's one-hour default for the sparse control and
+two hours for the unmeasured distribution projector. The user must submit
+the jobs:
+
+`sbatch --time=02:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 23:b --condition ensemble --projection-mode relative_distribution --num-anchors 2048`
+
+`sbatch /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 23:b --condition ensemble --projection-mode sparse_topk --num-anchors 2048`
+
+Open explicit mode-specific viewer manifests at
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-relative-distribution-20261104/doc23-relative_distribution.json`
+and
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-relative-distribution-20261104/doc23-sparse_topk.json`.
+Check completion and runtime first, then compare both trajectories at the
+first divergent commit and at the centimeter checkpoint, final-answer
+extraction, malformed output, inverse-fit KL, and top-source coverage. One
+example can validate feasibility and mechanism, not GSM8K accuracy.
+
+Pilot result (jobs `368807` relative distribution and `368808` sparse top-k,
+both on `gpu-47`): both completed without stderr errors. Sampling took
+356.79 s and 345.71 s respectively. Both produced the same 512 committed
+tokens and the same response: "The candle melts by 2 cm every hour. From
+12:00 PM to 5:00 PM is 5 hours in total. So, the candle will melt by 2 cm*5 =
+10 cm. The answer is 10." Gold is 8. The selected token sets are identical
+by absolute position; only a few commit steps differ. Neither reproduces the
+old 57,909-anchor benchmark response. At step 0.2, absolute position 69,
+both 2048-anchor modes commit ` cm` where the old full-anchor replay committed
+` kilometers`. The auxiliary top token is ` centimeters` (probability
+0.999237); the Dream master assigns ` cm` probability 0.964483. Relative
+distribution assigns projected ` cm` probability 0.238206 (fused 0.601344,
+fit KL 0.586377, 256 candidates). Sparse top-k assigns it 0.135541 (fused
+0.550012). Both improve the unit at this checkpoint, so the pilot does not
+attribute that improvement specifically to the new method. The remaining
+wrong answer comes from reading the question's 1:00 PM start as 12:00 PM.
+The relative projector also gives some mass to unrelated strings (` perfil`,
+`oured`) at this checkpoint; inspect its profile/candidate quality before
+scaling. Trace viewer manifests are
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-relative-distribution-20261104/doc23-relative_distribution.json`
+and
+`/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k4-relative-distribution-20261104/doc23-sparse_topk.json`.
+
+Full-anchor follow-up: replay doc 23 with `relative_distribution` and
+`--num-anchors auto` using the chunked memory-mapped backend. The replay driver
+adds an `-auto` suffix to this trace and manifest, preserving the 2048-anchor
+pilot under the same approved study ID. This has passed CPU preparation; GPU
+runtime and numerical output remain unmeasured. The user submits:
+
+`sbatch --time=06:00:00 /home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_benchmark_replay_slurm.sh ctca-gsm8k4-relative-distribution-20261104 --case 23:b --condition ensemble --projection-mode relative_distribution --num-anchors auto`
+
+Review preparation (2026-11-17): numeric anchor counts now appear in replay
+trace, reproduction, and manifest filenames, so distinct counts coexist.
+Earlier pilot artifacts may retain filenames without the `-2048` suffix.
+The temperature sweep requires a unique full-anchor baseline cache at anchor
+temperature 0.01, projection temperature 0.05, and top-k 64. The two approved
+tuned confidence controls now have planned JSON ledger records; submission
+and results have not been verified during this review. The tracker declares
+requirements for their protocol and the HumanEval exact-shared protocol.
+New numeric-anchor manifests use `doc<DOC>-<MODE>-<COUNT>.json`;
+`auto` keeps its existing `-auto` suffix. Historical artifact links above
+retain their recorded filenames.
