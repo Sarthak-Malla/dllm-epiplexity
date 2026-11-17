@@ -26,7 +26,7 @@ details { margin-top: 12px; } button { font: inherit; padding: 7px 12px; } .summ
 <label>Server trace URLs (comma separated) <input id="urls" type="text" value="demo_dummy_trace.jsonl"></label>
 <button id="loadUrls" type="button">Load server traces</button>
 <label>Replay manifest URL <input id="replayManifest" type="text" placeholder="/.logs/STUDY_ID/doc23.json"></label>
-<button id="loadReplay" type="button">Load replay pair</button>
+<button id="loadReplay" type="button">Load replay</button>
 <label>Trace files <input id="files" type="file" accept=".jsonl" multiple></label>
 <label>Question <select id="case"></select></label>
 <label>Decoding step <select id="step"></select></label>
@@ -224,7 +224,7 @@ async function loadReplay() {
     const response = await fetch(url, {cache: 'no-store'});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const manifest = await response.json();
-    if (!Array.isArray(manifest.traces) || manifest.traces.length !== 2) throw new Error('Expected an ensemble/endpoint pair');
+    if (!Array.isArray(manifest.traces) || manifest.traces.length < 1 || manifest.traces.length > 2) throw new Error('Expected one or two replay traces');
     $('urls').value = manifest.traces.join(',');
     await loadServerTraces();
     const checks = (manifest.reproduction || []).map(x => `${x.condition}: ${x.matches_original_response ? 'reproduced' : 'DIFFERS from benchmark'}`).join(' · ');
