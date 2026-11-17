@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctca-chunk-size", type=int, default=2500)
     parser.add_argument(
         "--ctca-projection-mode",
-        choices=("exact", "sparse_topk"),
+        choices=("exact", "sparse_topk", "relative_distribution"),
         default="sparse_topk",
     )
     parser.add_argument("--ctca-projection-top-k", type=int, default=64)
@@ -218,6 +218,12 @@ def make_ctca_trace_logger(
     def projection_route(mode: str) -> str:
         if mode == "exact":
             return "relative_anchor_exact"
+        if mode == "relative_distribution":
+            return (
+                "relative_distribution_plus_exact_shared"
+                if shared_token_policy == "exact_shared"
+                else "relative_distribution_only"
+            )
         return (
             "relative_anchor_plus_exact_shared"
             if shared_token_policy == "exact_shared"
@@ -552,6 +558,14 @@ def make_ctca_trace_logger(
                         "vocabulary_projection": {
                             "mode": payload["projection_mode"],
                             "route": projection_route(payload["projection_mode"]),
+                            **(
+                                {"diagnostics": {
+                                    key: float(value[active_index])
+                                    for key, value in payload["projection_diagnostics"].items()
+                                }}
+                                if payload.get("projection_diagnostics") is not None
+                                else {}
+                            ),
                         },
                     }
                 )

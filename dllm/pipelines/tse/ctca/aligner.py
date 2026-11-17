@@ -5,6 +5,11 @@ Run the focused tests with:
 """
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import tempfile
+
+import numpy as np
 
 import torch
 
@@ -12,6 +17,12 @@ from .cache import CTCACacheManager, tokenizer_vocab_signature
 from .canvas import build_canvas_overlap_matrix, spatial_warp_probabilities
 from .projection import (
     project_vocab_sparse_topk,
+)
+from .distribution_projection import (
+    RELATIVE_DISTRIBUTION_VERSION,
+    build_relative_distribution_profile_file,
+    build_relative_distribution_profiles,
+    project_relative_distribution,
 )
 from .relative import (
     RELATIVE_ANCHOR_VERSION,
@@ -22,6 +33,9 @@ from .relative import (
     project_vocab_relative_exact,
 )
 from dllm.pipelines.tse.utils import timer
+
+
+DISTRIBUTION_DENSE_ANCHOR_LIMIT = 2048
 
 
 @dataclass
@@ -38,6 +52,9 @@ class AuxiliaryRegistration:
     projection_top_k: int
     sparse_topk_by_device: dict[str, tuple[torch.Tensor, torch.Tensor]]
     sparse_topk_rebuilt_by_device: dict[str, bool]
+    distribution_profiles_by_device: dict[str, tuple[torch.Tensor, torch.Tensor]]
+    distribution_profiles_rebuilt_by_device: dict[str, bool]
+    shared_ordinary_ids: tuple[torch.Tensor, torch.Tensor] | None
 
 
 class CrossTokenizerAligner:
@@ -62,6 +79,7 @@ class CrossTokenizerAligner:
             raise ValueError("shared_token_policy must be 'relative' or 'exact_shared'")
         self.shared_token_policy = shared_token_policy
         self.cache = CTCACacheManager(cache_dir, force_rebuild=force_rebuild)
+        self._temporary_profile_dir = None
         self.auxiliary_models: dict[str, AuxiliaryRegistration] = {}
 
     def register_auxiliary_model(
@@ -83,8 +101,8 @@ class CrossTokenizerAligner:
             raise ValueError(f"auxiliary model is already registered: {auxiliary_id}")
         if anchor_temperature <= 0 or temperature <= 0 or chunk_size < 1:
             raise ValueError("temperatures and chunk_size must be positive")
-        if projection_mode not in {"exact", "sparse_topk"}:
-            raise ValueError("projection_mode must be 'exact' or 'sparse_topk'")
+        if projection_mode not in {"exact", "sparse_topk", "relative_distribution"}:
+            raise ValueError("projection_mode must be 'exact', 'sparse_topk', or 'relative_distribution'")
         if projection_top_k < 1:
             raise ValueError("projection_top_k must be positive")
         with timer("ctca.relative.collect_anchors"):
@@ -107,7 +125,127 @@ class CrossTokenizerAligner:
             projection_top_k=projection_top_k,
             sparse_topk_by_device={},
             sparse_topk_rebuilt_by_device={},
+            distribution_profiles_by_device={},
+            distribution_profiles_rebuilt_by_device={},
+            shared_ordinary_ids=None,
         )
+
+    def _distribution_profiles(
+        self, auxiliary_id: str, registration: AuxiliaryRegistration, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = str(device)
+        cached = registration.distribution_profiles_by_device.get(key)
+        if cached is None:
+            metadata = {
+                **self._relative_cache_metadata(auxiliary_id, registration),
+                "algorithm": "relative_distribution",
+                "version": RELATIVE_DISTRIBUTION_VERSION,
+                "selected_auxiliary_anchor_ids": registration.anchors.auxiliary_anchor_ids.tolist(),
+                "selected_master_anchor_ids": registration.anchors.master_anchor_ids.tolist(),
+            }
+
+            if registration.anchors.selected_anchors > DISTRIBUTION_DENSE_ANCHOR_LIMIT:
+                cached = self._chunked_distribution_profiles(metadata, registration)
+                registration.distribution_profiles_by_device[key] = cached
+                return cached
+
+            def build_tables() -> dict[str, torch.Tensor]:
+                return {
+                    "auxiliary_profiles": build_relative_distribution_profiles(
+                        registration.embeddings,
+                        registration.anchors.auxiliary_anchor_ids,
+                        temperature=registration.anchor_temperature,
+                        chunk_size=registration.chunk_size,
+                    ),
+                    "master_profiles": build_relative_distribution_profiles(
+                        self.master_embeddings,
+                        registration.anchors.master_anchor_ids,
+                        temperature=registration.anchor_temperature,
+                        chunk_size=registration.chunk_size,
+                    ),
+                }
+
+            with timer("ctca.relative.cache_distribution_profiles"):
+                tensors, rebuilt = self.cache.get_or_create_tensors(
+                    metadata,
+                    artifact="relative_distribution_profiles",
+                    builder=build_tables,
+                    required_keys=("auxiliary_profiles", "master_profiles"),
+                )
+            cached = (
+                tensors["auxiliary_profiles"].to(device),
+                tensors["master_profiles"].to(device),
+            )
+            registration.distribution_profiles_by_device[key] = cached
+            registration.distribution_profiles_rebuilt_by_device[key] = rebuilt
+        return cached
+
+    def _chunked_distribution_profiles(
+        self, metadata: dict, registration: AuxiliaryRegistration
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Memory-map full profiles; never load both full tables onto a GPU."""
+        if self.cache.cache_dir is None:
+            if self._temporary_profile_dir is None:
+                self._temporary_profile_dir = tempfile.TemporaryDirectory(prefix="ctca-profiles-")
+            cache_dir = Path(self._temporary_profile_dir.name)
+        else:
+            cache_dir = self.cache.cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        signature = self.cache.signature(metadata)
+        paths = [
+            cache_dir / f"relative_distribution_aux_{signature}.npy",
+            cache_dir / f"relative_distribution_master_{signature}.npy",
+        ]
+        sources = [
+            (registration.embeddings, registration.anchors.auxiliary_anchor_ids),
+            (self.master_embeddings, registration.anchors.master_anchor_ids),
+        ]
+        rebuilt = False
+        profiles = []
+        for path, (embeddings, anchor_ids) in zip(paths, sources):
+            expected = (embeddings.shape[0], anchor_ids.numel())
+            if path.exists() and not self.cache.force_rebuild:
+                table = np.load(path, mmap_mode="r+")
+                if table.shape != expected or table.dtype != np.float16:
+                    raise ValueError(f"Malformed CTCA profile cache: {path}")
+            else:
+                rebuilt = True
+                temporary = path.with_name(path.name + f".{os.getpid()}.tmp.npy")
+                try:
+                    build_relative_distribution_profile_file(
+                        embeddings, anchor_ids, temporary,
+                        temperature=registration.anchor_temperature,
+                        chunk_size=min(registration.chunk_size, 512),
+                    )
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                table = np.load(path, mmap_mode="r+")
+            profiles.append(torch.from_numpy(table))
+        registration.distribution_profiles_rebuilt_by_device["chunked"] = rebuilt
+        return profiles[0], profiles[1]
+
+    def _shared_ordinary_ids(self, registration: AuxiliaryRegistration) -> tuple[torch.Tensor, torch.Tensor]:
+        if registration.shared_ordinary_ids is not None:
+            return registration.shared_ordinary_ids
+        auxiliary_special = set(getattr(registration.tokenizer, "all_special_ids", []))
+        master_special = set(getattr(self.master_tokenizer, "all_special_ids", []))
+        master_vocab = self.master_tokenizer.get_vocab()
+        pairs = [
+            (int(auxiliary_id), int(master_vocab[token]))
+            for token, auxiliary_id in registration.tokenizer.get_vocab().items()
+            if token in master_vocab
+            and 0 <= int(auxiliary_id) < registration.embeddings.shape[0]
+            and 0 <= int(master_vocab[token]) < self.master_embeddings.shape[0]
+            and int(auxiliary_id) not in auxiliary_special
+            and int(master_vocab[token]) not in master_special
+        ]
+        pairs.sort()
+        registration.shared_ordinary_ids = (
+            torch.tensor([p[0] for p in pairs], dtype=torch.long),
+            torch.tensor([p[1] for p in pairs], dtype=torch.long),
+        )
+        return registration.shared_ordinary_ids
 
     def _sparse_topk_projection(
         self,
@@ -190,9 +328,10 @@ class CrossTokenizerAligner:
             "anchor_temperature": registration.anchor_temperature,
             "projection_temperature": registration.temperature,
             "sparse_topk_cache_rebuilt": dict(registration.sparse_topk_rebuilt_by_device),
+            "relative_distribution_cache_rebuilt": dict(registration.distribution_profiles_rebuilt_by_device),
             "shared_token_policy": (
                 self.shared_token_policy
-                if registration.projection_mode == "sparse_topk"
+                if registration.projection_mode in {"sparse_topk", "relative_distribution"}
                 else "relative"
             ),
         }
@@ -202,6 +341,8 @@ class CrossTokenizerAligner:
         registration = self.auxiliary_models[auxiliary_id]
         if registration.projection_mode == "sparse_topk":
             self._sparse_topk_projection(auxiliary_id, registration, device)
+        elif registration.projection_mode == "relative_distribution":
+            self._distribution_profiles(auxiliary_id, registration, device)
 
     def project_model_probabilities(
         self,
@@ -261,6 +402,32 @@ class CrossTokenizerAligner:
             registration = self.auxiliary_models[auxiliary_id]
         except KeyError as error:
             raise KeyError(f"unknown CTCA auxiliary model: {auxiliary_id}") from error
+        if registration.projection_mode == "relative_distribution":
+            with timer("ctca.projection.prepare"):
+                auxiliary_profiles, master_profiles = self._distribution_profiles(
+                    auxiliary_id, registration, spatial_probabilities.device
+                )
+                shared_auxiliary_ids, shared_master_ids = self._shared_ordinary_ids(registration)
+            with timer("ctca.aligner.vocab_projection"):
+                projected, diagnostics = project_relative_distribution(
+                    spatial_probabilities,
+                    auxiliary_profiles,
+                    master_profiles,
+                    auxiliary_special_ids=torch.tensor(
+                        getattr(registration.tokenizer, "all_special_ids", []), dtype=torch.long
+                    ),
+                    master_special_ids=torch.tensor(
+                        getattr(self.master_tokenizer, "all_special_ids", []), dtype=torch.long
+                    ),
+                    shared_auxiliary_ids=shared_auxiliary_ids,
+                    shared_master_ids=shared_master_ids,
+                    exact_shared=self.shared_token_policy == "exact_shared",
+                    projection_temperature=registration.temperature,
+                    chunk_size=registration.chunk_size,
+                    return_diagnostics=True,
+                )
+            self.last_distribution_diagnostics = diagnostics
+            return projected
         if registration.projection_mode == "sparse_topk":
             with timer("ctca.projection.prepare"):
                 top_indices, top_weights = self._sparse_topk_projection(

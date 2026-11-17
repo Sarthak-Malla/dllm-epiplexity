@@ -468,6 +468,9 @@ class CTCATSESampler:
                         self.auxiliary_id
                     ),
                     "projection_mode": self._projection_mode,
+                    "projection_diagnostics": getattr(
+                        self.aligner, "last_distribution_diagnostics", None
+                    ) if self._projection_mode == "relative_distribution" else None,
                 },
             )
         if master_probabilities.shape != projected_auxiliary.shape:
@@ -515,8 +518,10 @@ class CTCATSESampler:
             raise ValueError("baseline_model must be 'a' or 'b'")
         if selection_mode not in {"baseline", "tse"}:
             raise ValueError("selection_mode must be 'baseline' or 'tse'")
-        if remasking not in {"low_confidence", "random", "entropy"}:
+        if remasking not in {"low_confidence", "random", "entropy", "consensus"}:
             raise ValueError(f"Unsupported remasking strategy: {remasking}")
+        if remasking == "consensus" and selection_mode != "tse":
+            raise ValueError("consensus remasking requires selection_mode='tse'")
         if weighting_mode not in {"static", "online_entropy", "per_token_margin"}:
             raise ValueError(
                 "weighting_mode must be 'static', 'online_entropy', "
@@ -691,12 +696,16 @@ class CTCATSESampler:
                         )
                         confidence, predicted_tokens = fused_confidence(fused)
                         consensus = consensus_scores(confidence, agreement)
-                        # Keep token proposals greedy; only the commit ranking
-                        # changes under the entropy policy.
+                        # Keep token proposals greedy; remasking changes only
+                        # which positions commit at each scheduled step.
                         scores = (
-                            -entropy(fused, epsilon=1e-10)
-                            if remasking == "entropy"
-                            else confidence
+                            consensus
+                            if remasking == "consensus"
+                            else (
+                                -entropy(fused, epsilon=1e-10)
+                                if remasking == "entropy"
+                                else confidence
+                            )
                         )
                     else:
                         selected_probabilities = (
@@ -789,9 +798,13 @@ class CTCATSESampler:
                             ),
                             "selection_score_name": (
                                 (
-                                    "negative_fused_entropy"
-                                    if remasking == "entropy"
-                                    else "fused_top_probability"
+                                    "confidence_times_agreement"
+                                    if remasking == "consensus"
+                                    else (
+                                        "negative_fused_entropy"
+                                        if remasking == "entropy"
+                                        else "fused_top_probability"
+                                    )
                                 )
                                 if selection_mode == "tse"
                                 else (
@@ -887,9 +900,13 @@ class CTCATSESampler:
                             ].detach().cpu(),
                             "selection_score_name": (
                                 (
-                                    "negative_fused_entropy"
-                                    if remasking == "entropy"
-                                    else "fused_top_probability"
+                                    "confidence_times_agreement"
+                                    if remasking == "consensus"
+                                    else (
+                                        "negative_fused_entropy"
+                                        if remasking == "entropy"
+                                        else "fused_top_probability"
+                                    )
                                 )
                                 if selection_mode == "tse"
                                 else (
@@ -904,9 +921,13 @@ class CTCATSESampler:
                             ),
                             "commit_reason": (
                                 (
-                                    "lowest_fused_entropy"
-                                    if remasking == "entropy"
-                                    else "highest_fused_confidence"
+                                    "highest_confidence_times_agreement"
+                                    if remasking == "consensus"
+                                    else (
+                                        "lowest_fused_entropy"
+                                        if remasking == "entropy"
+                                        else "highest_fused_confidence"
+                                    )
                                 )
                                 if selection_mode == "tse"
                                 else f"baseline_{baseline_model}"

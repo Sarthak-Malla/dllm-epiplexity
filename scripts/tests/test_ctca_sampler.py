@@ -3,6 +3,7 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
@@ -232,6 +233,70 @@ def test_ctca_entropy_ranks_fused_distributions_not_top_probability(monkeypatch)
     assert entropy_ranked["selected_positions"].tolist() == [[0, 2]]
     assert entropy_ranked["selection_score_name"] == "negative_fused_entropy"
     assert entropy_ranked["commit_reason"] == "lowest_fused_entropy"
+
+
+@pytest.mark.parametrize("master_id", ["a", "b"])
+def test_ctca_consensus_prioritizes_agreement_over_fused_confidence(monkeypatch, master_id):
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    # Position 1 has higher fused confidence but the models disagree there.
+    master = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0], [0.6, 0.4, 0.0, 0.0, 0.0]])
+    auxiliary = torch.tensor([[0.4, 0.6, 0.0, 0.0, 0.0], [0.6, 0.4, 0.0, 0.0, 0.0]])
+
+    def run(remasking):
+        sampler = CTCATSESampler(
+            FixedMaskedModel(len(tokenizer.get_vocab())),
+            FixedMaskedModel(len(tokenizer.get_vocab())),
+            tokenizer,
+            tokenizer,
+            "cpu",
+            "cpu",
+            master_id=master_id,
+            auxiliary_id="b" if master_id == "a" else "a",
+            cache_dir=None,
+            num_anchors=3,
+            min_anchors=3,
+        )
+
+        def aligned_probabilities(canvas, *_args, **_kwargs):
+            positions = (canvas == tokenizer.mask_token_id).nonzero(as_tuple=False)
+            indices = positions[:, 1] - 1
+            return master[indices], auxiliary[indices], positions
+
+        monkeypatch.setattr(sampler, "_forward_aligned_probabilities", aligned_probabilities)
+        events = {"fusion": [], "decision": []}
+        sampler.sample(
+            [torch.tensor([0])],
+            auxiliary_inputs=[torch.tensor([0])],
+            max_new_tokens=2,
+            steps=2,
+            block_size=2,
+            remasking=remasking,
+            selection_mode="tse",
+            weighting_mode="static",
+            alpha=0.5,
+            trace_callback=lambda event, payload: (
+                events[event].append(payload) if event in events else None
+            ),
+        )
+        return events
+
+    confidence = run("low_confidence")
+    consensus = run("consensus")
+    assert confidence["decision"][0]["selected_positions"].tolist() == [[0, 1]]
+    assert consensus["decision"][0]["selected_positions"].tolist() == [[0, 2]]
+    assert torch.equal(
+        confidence["fusion"][0]["fused_probabilities"],
+        consensus["fusion"][0]["fused_probabilities"],
+    )
+    assert consensus["fusion"][0]["predicted_tokens"].tolist() == [0, 0]
+    assert torch.allclose(
+        consensus["fusion"][0]["scores"],
+        consensus["fusion"][0]["fused_probabilities"].max(dim=-1).values
+        * consensus["fusion"][0]["agreement_scores"],
+    )
+    assert consensus["decision"][0]["selection_score_name"] == "confidence_times_agreement"
+    assert consensus["decision"][0]["commit_reason"] == "highest_confidence_times_agreement"
+    assert len(consensus["decision"]) == len(confidence["decision"]) == 2
 
 
 def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
@@ -693,6 +758,30 @@ def test_ctca_sampler_runs_exact_relative_projection_backend():
         2,
         len(master_tokenizer.get_vocab()),
     )
+
+
+def test_ctca_sampler_runs_relative_distribution_projection_backend():
+    master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary_tokenizer = CharacterTokenizer(["a", "b", "c", "d"], "<mask>", "<pad>")
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master_tokenizer.get_vocab()), hidden_size=2),
+        FixedMaskedModel(len(auxiliary_tokenizer.get_vocab()), hidden_size=3),
+        master_tokenizer,
+        auxiliary_tokenizer,
+        "cpu", "cpu", master_id="a", auxiliary_id="b", cache_dir=None,
+        projection_temperature=0.5, projection_chunk_size=2,
+        projection_mode="relative_distribution", num_anchors=3, min_anchors=3,
+    )
+    generated = sampler.sample(
+        [torch.tensor([0])], auxiliary_inputs=[torch.tensor([0])],
+        max_new_tokens=2, steps=2, block_size=2, selection_mode="tse",
+        weighting_mode="static", capture_logits=True,
+    )
+    assert not torch.any(generated[0, 1:] == master_tokenizer.mask_token_id)
+    assert sampler.last_aligned_probabilities[0][2].shape == (
+        2, len(master_tokenizer.get_vocab())
+    )
+    assert torch.isfinite(sampler.aligner.last_distribution_diagnostics["fit_kl"]).all()
 
 
 def test_ctca_sampler_batches_canvas_and_projection_across_samples():

@@ -106,8 +106,8 @@ def _validate_config(config: TSEConfig) -> None:
         raise ValueError("ctca_projection_temperature must be positive")
     if config.ctca_chunk_size < 1:
         raise ValueError("ctca_chunk_size must be positive")
-    if config.ctca_projection_mode not in {"exact", "sparse_topk"}:
-        raise ValueError("ctca_projection_mode must be 'exact' or 'sparse_topk'")
+    if config.ctca_projection_mode not in {"exact", "sparse_topk", "relative_distribution"}:
+        raise ValueError("ctca_projection_mode must be 'exact', 'sparse_topk', or 'relative_distribution'")
     if config.ctca_shared_token_policy not in {"relative", "exact_shared"}:
         raise ValueError(
             "ctca_shared_token_policy must be 'relative' or 'exact_shared'"

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from dllm.pipelines.tse.ctca.alignment import align_embeddings_procrustes
 from dllm.pipelines.tse.ctca.aligner import CrossTokenizerAligner
+from dllm.pipelines.tse.ctca.distribution_projection import project_relative_distribution
 from dllm.pipelines.tse.ctca.cache import CTCACacheManager
 from dllm.pipelines.tse.ctca.canvas import (
     build_canvas_overlap_matrix,
@@ -509,6 +510,108 @@ def test_relative_anchor_sparse_matches_exact_when_topk_covers_vocab():
 
     assert torch.allclose(sparse, exact, atol=1e-6)
     assert torch.allclose(sparse.sum(dim=-1), torch.ones(1), atol=1e-6)
+
+
+def test_relative_distribution_uses_whole_distribution_and_preserves_shared_mass():
+    # A 50/50 mixture of two auxiliary endpoints has a master-token profile
+    # exactly at the midpoint. A fixed per-token map cannot choose that token.
+    auxiliary_profiles = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.5, 0.5]]
+    )
+    master_profiles = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.5, 0.5]]
+    )
+    projected, diagnostics = project_relative_distribution(
+        torch.tensor([[0.5, 0.5, 0.0, 0.0], [0.0, 0.4, 0.6, 0.0], [0.0, 0.0, 1.0, 0.0]]),
+        auxiliary_profiles,
+        master_profiles,
+        auxiliary_special_ids=torch.tensor([3]),
+        master_special_ids=torch.tensor([3]),
+        shared_auxiliary_ids=torch.tensor([2]),
+        shared_master_ids=torch.tensor([2]),
+        exact_shared=True,
+        projection_temperature=0.05,
+        chunk_size=2,
+        return_diagnostics=True,
+    )
+    assert projected[0, 2] > projected[0, 0]
+    assert projected[0, 2] > projected[0, 1]
+    assert projected[1, 2] >= 0.6
+    assert projected[2, 2].item() == pytest.approx(1.0)
+    assert torch.allclose(projected.sum(dim=1), torch.ones(3), atol=1e-6)
+    assert torch.all(projected[:, 3] == 0)
+    assert torch.isfinite(diagnostics["fit_kl"]).all()
+
+
+def test_relative_distribution_cache_reloads_without_changing_old_cache(tmp_path):
+    auxiliary = ToyTokenizer(
+        ["a", "b", "x", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    master = ToyTokenizer(
+        ["a", "b", "y", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+
+    def make_aligner(mode):
+        aligner = CrossTokenizerAligner(master, torch.eye(5, 3), master_id="master", cache_dir=tmp_path)
+        aligner.register_auxiliary_model(
+            "aux", auxiliary, torch.eye(5, 3), projection_mode=mode,
+            num_anchors=2, min_anchors=2, chunk_size=2, projection_top_k=2,
+        )
+        aligner.warm_projection_cache("aux", torch.device("cpu"))
+        return aligner
+
+    first = make_aligner("relative_distribution")
+    second = make_aligner("relative_distribution")
+    original = make_aligner("sparse_topk")
+    assert first.projection_diagnostics("aux")["relative_distribution_cache_rebuilt"]["cpu"] is True
+    assert second.projection_diagnostics("aux")["relative_distribution_cache_rebuilt"]["cpu"] is False
+    assert original.projection_diagnostics("aux")["sparse_topk_cache_rebuilt"]["cpu"] is True
+    projected = second.project_spatial_probabilities(
+        "aux", torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0]])
+    )
+    assert projected.shape == (1, 5)
+    assert torch.allclose(projected.sum(dim=1), torch.ones(1), atol=1e-6)
+
+
+def test_full_anchor_chunked_profiles_match_dense_profiles(tmp_path, monkeypatch):
+    auxiliary = ToyTokenizer(
+        ["a", "b", "c", "x", "<pad>", "<mask>"],
+        mask_token="<mask>", pad_token="<pad>",
+    )
+    master = ToyTokenizer(
+        ["a", "b", "c", "y", "<pad>", "<mask>"],
+        mask_token="<mask>", pad_token="<pad>",
+    )
+    embeddings = torch.tensor([
+        [1.0, 0.0, 0.1], [0.0, 1.0, 0.1], [0.2, 0.1, 1.0],
+        [0.5, 0.7, 0.3], [0.1, 0.1, 0.1], [0.1, 0.1, 0.1],
+    ])
+    probabilities = torch.tensor([
+        [0.1, 0.2, 0.0, 0.7, 0.0, 0.0],
+        [0.0, 0.1, 0.3, 0.6, 0.0, 0.0],
+    ])
+
+    def make_aligner():
+        aligner = CrossTokenizerAligner(master, embeddings, master_id="master", cache_dir=tmp_path)
+        aligner.register_auxiliary_model(
+            "aux", auxiliary, embeddings, projection_mode="relative_distribution",
+            num_anchors="auto", min_anchors=2, chunk_size=2,
+        )
+        return aligner
+
+    dense = make_aligner()
+    dense_result = dense.project_spatial_probabilities("aux", probabilities)
+    monkeypatch.setattr(
+        "dllm.pipelines.tse.ctca.aligner.DISTRIBUTION_DENSE_ANCHOR_LIMIT", 2
+    )
+    chunked = make_aligner()
+    chunked_result = chunked.project_spatial_probabilities("aux", probabilities)
+    assert chunked.projection_diagnostics("aux")["selected_anchors"] == 3
+    assert torch.allclose(chunked_result, dense_result, atol=1e-5)
+    assert chunked.projection_diagnostics("aux")["relative_distribution_cache_rebuilt"]["chunked"]
+    reloaded = make_aligner()
+    assert torch.allclose(reloaded.project_spatial_probabilities("aux", probabilities), dense_result, atol=1e-5)
+    assert not reloaded.projection_diagnostics("aux")["relative_distribution_cache_rebuilt"]["chunked"]
 
 
 def test_chunked_projection_matches_dense_and_normalizes_rows():
