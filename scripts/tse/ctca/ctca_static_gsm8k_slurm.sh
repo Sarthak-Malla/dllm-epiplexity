@@ -17,7 +17,7 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p .logs
 
-CONFIG_PATH="${1:-scripts/tse/configs/ctca_gsm8k_static.conf}"
+CONFIG_PATH="${1:-scripts/tse/configs/ctca_gsm8k_dream_master.conf}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
     echo "Configuration file not found: ${CONFIG_PATH}" >&2
     exit 1
@@ -27,7 +27,7 @@ source "${CONFIG_PATH}"
 # Preserve existing configurations that do not specify an evaluation batch size.
 batch_size="${batch_size:-1}"
 progress_wandb="${progress_wandb:-false}"
-progress_wandb_project="${progress_wandb_project:-dllm-tse}"
+progress_wandb_project="${progress_wandb_project:-dllm-ensemble}"
 progress_wandb_entity="${progress_wandb_entity:-}"
 progress_wandb_log_interval="${progress_wandb_log_interval:-1}"
 ctca_canvas_workers="${ctca_canvas_workers:-8}"
@@ -118,6 +118,7 @@ echo "ctca_num_anchors=${ctca_num_anchors}"
 echo "ctca_min_anchors=${ctca_min_anchors}"
 echo "ctca_canvas_workers=${ctca_canvas_workers}"
 echo "task=${task}"
+echo "limit=${limit:-full}"
 echo "num_fewshot=${num_fewshot}"
 echo "batch_size=${batch_size}"
 echo "progress_wandb=${progress_wandb}"
@@ -147,17 +148,23 @@ if [[ -n "${progress_wandb_entity}" ]]; then
 fi
 echo "MODEL_ARGS=${MODEL_ARGS}"
 
-accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py \
-    --tasks "${task}" \
-    --num_fewshot "${num_fewshot}" \
-    --model tse_llada \
-    --batch_size "${batch_size}" \
-    --apply_chat_template \
-    --output_path "${RESULT_PATH}" \
+eval_args=(
+    --tasks "${task}"
+    --num_fewshot "${num_fewshot}"
+    --model tse_llada
+    --batch_size "${batch_size}"
+    --apply_chat_template
+    --output_path "${RESULT_PATH}"
     --model_args "${MODEL_ARGS}"
+)
+if [[ -n "${limit:-}" ]]; then
+    eval_args+=(--limit "${limit}")
+fi
+accelerate launch --num_processes 1 dllm/pipelines/tse/eval.py "${eval_args[@]}"
 
 python scripts/tse/log_eval_to_wandb.py \
     --result-path "${RESULT_PATH}" \
+    --project "${progress_wandb_project}" \
     --run-name "${RUN_NAME}" \
     --mode ctca \
     --weighting-mode "${weighting_mode}" \

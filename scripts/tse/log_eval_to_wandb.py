@@ -4,7 +4,7 @@ Run from the repository root with:
 
     python scripts/tse/log_eval_to_wandb.py \
         --result-path .logs/eval.json \
-        --project dllm-tse \
+        --project dllm-ensemble \
         --run-name tse-gsm8k-static \
         --mode tse \
         --weighting-mode static
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-path", type=Path, required=True)
     parser.add_argument(
-        "--project", default=os.environ.get("WANDB_PROJECT", "dllm-tse")
+        "--project", default=os.environ.get("WANDB_PROJECT", "dllm-ensemble")
     )
     parser.add_argument("--entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--run-name", required=True)

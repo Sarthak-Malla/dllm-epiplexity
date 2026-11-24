@@ -26,26 +26,6 @@ class WeightingResult:
         return torch.stack([self.weights_a, self.weights_b], dim=-1)
 
 
-def _validate_probabilities(
-    probabilities_a: torch.Tensor,
-    probabilities_b: torch.Tensor,
-) -> None:
-    if probabilities_a.shape != probabilities_b.shape:
-        raise ValueError(
-            "probability tensors must have identical shapes: "
-            f"{tuple(probabilities_a.shape)} != {tuple(probabilities_b.shape)}"
-        )
-    if probabilities_a.ndim != 2:
-        raise ValueError("active probabilities must have shape [N, vocab_size]")
-    if (
-        not torch.isfinite(probabilities_a).all()
-        or not torch.isfinite(probabilities_b).all()
-        or (probabilities_a < 0).any()
-        or (probabilities_b < 0).any()
-    ):
-        raise ValueError("probabilities must be finite and non-negative")
-
-
 def _validate_temperature(weight_temperature: float) -> None:
     if weight_temperature <= 0:
         raise ValueError("weight_temperature must be positive")
@@ -213,3 +193,29 @@ def per_token_margin_weights(
         pairwise,
         diagnostics={"margin_a": margins[:, 0], "margin_b": margins[:, 1]},
     )
+
+
+def pairwise_weights(
+    probabilities_a: torch.Tensor,
+    probabilities_b: torch.Tensor,
+    *,
+    mode: str,
+    alpha: float,
+    weight_temperature: float,
+    epsilon: float,
+    normalize_entropy: bool,
+) -> torch.Tensor:
+    """Return the first distribution's weight at each scored position."""
+    if mode == "static":
+        result = static_weights(alpha, probabilities_a.shape[0], probabilities_a.device)
+    elif mode == "online_entropy":
+        result = online_entropy_weights(
+            probabilities_a, probabilities_b, weight_temperature, epsilon, normalize_entropy
+        )
+    elif mode == "per_token_margin":
+        result = per_token_margin_weights(
+            probabilities_a, probabilities_b, weight_temperature
+        )
+    else:
+        raise ValueError(f"Unsupported weighting mode: {mode}")
+    return result.weights_a

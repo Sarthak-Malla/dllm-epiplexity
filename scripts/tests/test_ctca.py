@@ -1,12 +1,10 @@
 """Run with: pytest scripts/tests/test_ctca.py -v"""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 import torch.nn.functional as F
 
-from dllm.pipelines.tse.ctca.alignment import align_embeddings_procrustes
+from dllm.pipelines.tse.ctca.aligner import CrossTokenizerAligner
 from dllm.pipelines.tse.ctca.cache import CTCACacheManager
 from dllm.pipelines.tse.ctca.canvas import (
     build_canvas_overlap_matrix,
@@ -15,8 +13,7 @@ from dllm.pipelines.tse.ctca.canvas import (
     spatial_warp_probabilities,
 )
 from dllm.pipelines.tse.ctca.projection import (
-    build_sparse_topk_vocab_projection,
-    project_vocab_fused,
+    match_decoded_tokens,
     project_vocab_sparse_topk,
 )
 from dllm.pipelines.tse.ctca.relative import (
@@ -236,52 +233,6 @@ def test_slow_tokenizer_offsets_are_derived_from_decoded_prefixes():
     assert offsets == [(0.0, 2.0), (2.0, 3.0)]
 
 
-def test_procrustes_recovers_synthetic_rotation():
-    tokenizer = ToyTokenizer(
-        ["a", "b", "c", "d", "<pad>", "<mask>"],
-        mask_token="<mask>",
-        pad_token="<pad>",
-    )
-    auxiliary = F.normalize(
-        torch.tensor(
-            [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0], [0.2, 0.3], [0.4, 0.5]]
-        ),
-        dim=-1,
-    )
-    expected_rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
-    master = auxiliary @ expected_rotation
-
-    result = align_embeddings_procrustes(
-        auxiliary,
-        master,
-        tokenizer,
-        tokenizer,
-        num_anchors=4,
-        min_anchors=4,
-    )
-
-    assert torch.allclose(result.rotation, expected_rotation, atol=1e-5)
-
-
-def test_procrustes_rejects_too_few_shared_anchors():
-    auxiliary_tokenizer = ToyTokenizer(
-        ["a", "x", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
-    )
-    master_tokenizer = ToyTokenizer(
-        ["a", "y", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
-    )
-
-    with pytest.raises(ValueError, match="too few shared anchors"):
-        align_embeddings_procrustes(
-            torch.randn(4, 2),
-            torch.randn(4, 2),
-            auxiliary_tokenizer,
-            master_tokenizer,
-            num_anchors=2,
-            min_anchors=2,
-        )
-
-
 def test_relative_anchor_selection_supports_auto_and_integer_caps():
     auxiliary_tokenizer = ToyTokenizer(
         ["a", "b", "c", "x", "<pad>", "<mask>"],
@@ -333,6 +284,209 @@ def test_relative_anchor_rejects_too_few_shared_anchors():
             num_anchors="auto",
             min_anchors=2,
         )
+
+
+def test_relative_anchors_keep_case_and_boundary_markers():
+    tokens = ["the", "The", "Ġthe", "<pad>", "<mask>"]
+    auxiliary = ToyTokenizer(tokens, mask_token="<mask>", pad_token="<pad>")
+    master = ToyTokenizer(tokens[::-1], mask_token="<mask>", pad_token="<pad>")
+
+    anchors = collect_relative_anchor_ids(
+        auxiliary,
+        master,
+        auxiliary_vocab_size=len(tokens),
+        master_vocab_size=len(tokens),
+        min_anchors=3,
+    )
+
+    assert anchors.auxiliary_anchor_ids.tolist() == [1, 0, 2]
+    assert anchors.master_anchor_ids.tolist() == [3, 4, 2]
+
+
+@pytest.mark.parametrize("projection_mode", ["exact", "sparse_topk"])
+def test_projection_prefers_unambiguous_decoded_matches_and_preserves_mass(
+    projection_mode,
+):
+    class AliasTokenizer(ToyTokenizer):
+        def __init__(self, decoded_by_token):
+            super().__init__(
+                [*decoded_by_token, "<pad>", "<mask>"],
+                mask_token="<mask>",
+                pad_token="<pad>",
+            )
+            self.decoded_by_token = decoded_by_token
+
+        def decode(self, ids, **kwargs):
+            return "".join(
+                self.decoded_by_token.get(self._tokens[int(index)], "")
+                for index in ids
+            )
+
+    master = AliasTokenizer(
+        {
+            "duplicate": "word",
+            "shared": "word",
+            "Ġsaid": " said",
+            "bad": "\ufffd",
+        }
+    )
+    auxiliary = AliasTokenizer(
+        {
+            "ambiguous": "word",
+            "shared": "word",
+            "▁said": " said",
+            "added_said": " said",
+            "other_bad": "\ufffd",
+            "unspaced": "said",
+        }
+    )
+    matches = match_decoded_tokens(
+        auxiliary, master, auxiliary_vocab_size=8, master_vocab_size=6
+    )
+    assert matches.auxiliary_ids.tolist() == [1, 2, 3]
+    assert matches.master_ids.tolist() == [1, 2, 2]
+    assert matches.unmatched_ids.tolist() == [0, 4, 5, 6]
+
+    aligner = CrossTokenizerAligner(
+        master, torch.eye(6), master_id="master", cache_dir=None
+    )
+    aligner.register_auxiliary_model(
+        "auxiliary",
+        auxiliary,
+        torch.eye(8),
+        projection_mode=projection_mode,
+        projection_top_k=6,
+        temperature=0.5,
+        chunk_size=2,
+        min_anchors=1,
+    )
+    probabilities = torch.zeros(3, 8)
+    probabilities[0, 1:4] = torch.tensor([0.2, 0.3, 0.5])
+    probabilities[1, 0] = 1
+    probabilities[2] = 0.4 * probabilities[0] + 0.6 * probabilities[1]
+
+    projected = aligner.project_spatial_probabilities("auxiliary", probabilities)
+
+    assert torch.allclose(projected[0], torch.tensor([0, 0.2, 0.8, 0, 0, 0]))
+    assert (projected[1, :master.mask_token_id] > 0).all()
+    assert (projected[:, master.mask_token_id] == 0).all()
+    assert torch.allclose(projected[2], 0.4 * projected[0] + 0.6 * projected[1])
+    assert torch.allclose(projected.sum(dim=-1), torch.ones(3))
+
+
+@pytest.mark.parametrize("projection_mode", ["exact", "sparse_topk"])
+def test_projection_excludes_masks_and_unassigned_rows_before_ranking(projection_mode):
+    master = ToyTokenizer(
+        ["a", "b", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    auxiliary = ToyTokenizer(
+        ["a", "b", "x", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    # A mask ID can be present even when the tokenizer omits it from this list.
+    master.all_special_ids = [master.pad_token_id]
+    auxiliary.all_special_ids = [auxiliary.pad_token_id]
+    # The excluded master IDs are the best matches for "x" in relative space.
+    master_embeddings = torch.tensor(
+        [[1.0, 0.0], [-1.0, 0.0], [1.0, 0.0]] + [[0.0, 1.0]] * 65
+    )
+    auxiliary_embeddings = torch.tensor(
+        [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+    )
+    aligner = CrossTokenizerAligner(
+        master, master_embeddings, master_id="master", cache_dir=None
+    )
+    aligner.register_auxiliary_model(
+        "aux",
+        auxiliary,
+        auxiliary_embeddings,
+        projection_mode=projection_mode,
+        min_anchors=2,
+        chunk_size=8,
+    )
+
+    probabilities = torch.tensor(
+        [[0.0, 0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.5, 0.5]]
+    )
+    projected = aligner.project_spatial_probabilities("aux", probabilities)
+
+    assert torch.allclose(projected[0, :3], torch.full((3,), 1 / 3))
+    assert torch.count_nonzero(projected[:, 3:]) == 0
+    assert torch.count_nonzero(projected[1]) == 0
+    diagnostics = aligner.projection_diagnostics("aux")
+    assert diagnostics["selected_anchors"] == 2
+    assert diagnostics["relative_projection_rows"] == 2
+
+
+@pytest.mark.parametrize("projection_mode", ["exact", "sparse_topk"])
+def test_first_piece_projection_uses_all_mass_only_when_the_encoding_fits(
+    projection_mode,
+):
+    master = ToyTokenizer(
+        ["cent", "imeters", "kilo", "me", "ters", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    auxiliary = ToyTokenizer(
+        ["centimeters", "kilometers", "cent", "kilo", "xmeters", "<pad>", "<mask>"],
+        mask_token="<mask>",
+        pad_token="<pad>",
+    )
+    rng = torch.Generator().manual_seed(2)
+    aligner = CrossTokenizerAligner(
+        master, torch.randn(7, 3, generator=rng), master_id="master", cache_dir=None
+    )
+    aligner.register_auxiliary_model(
+        "aux",
+        auxiliary,
+        torch.randn(7, 4, generator=rng),
+        projection_mode=projection_mode,
+        temperature=0.5,
+        min_anchors=2,
+        chunk_size=2,
+    )
+    # The first three rows have the same input and different amounts of room.
+    # xmeters can only be tokenized lossily by this master tokenizer.
+    probabilities = torch.tensor([[0.5, 0.25, 0.25, 0, 0, 0, 0]] * 3)
+    probabilities = torch.cat((probabilities, torch.eye(7)[4:5]))
+    projected = aligner.project_spatial_probabilities(
+        "aux", probabilities, masked_slots_to_right=torch.tensor([0, 1, 2, 5])
+    )
+    relative = aligner.project_spatial_probabilities("aux", probabilities)
+    kilo_fallback = aligner.project_spatial_probabilities("aux", torch.eye(7)[1:2])[0]
+    cent = torch.eye(7)[master.get_vocab()["cent"]]
+    kilo = torch.eye(7)[master.get_vocab()["kilo"]]
+
+    assert torch.allclose(projected[0], relative[0])
+    assert torch.allclose(projected[1], 0.75 * cent + 0.25 * kilo_fallback)
+    assert torch.allclose(projected[2], 0.75 * cent + 0.25 * kilo)
+    assert torch.allclose(projected[3], relative[3])
+    assert torch.allclose(projected.sum(dim=-1), torch.ones(4))
+    assert aligner.projection_diagnostics("aux")["first_piece_matches"] == 2
+
+
+def test_first_piece_requires_an_assigned_master_token_id():
+    class UnassignedPieceTokenizer(ToyTokenizer):
+        def __call__(self, text, **kwargs):
+            if text == "centimeters":
+                vocab = self.get_vocab()
+                return {"input_ids": [len(vocab), vocab["imeters"]]}
+            return super().__call__(text, **kwargs)
+
+    master = UnassignedPieceTokenizer(
+        ["cent", "imeters", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    auxiliary = ToyTokenizer(
+        ["centimeters", "<pad>", "<mask>"], mask_token="<mask>", pad_token="<pad>"
+    )
+    matches = match_decoded_tokens(
+        auxiliary,
+        master,
+        auxiliary_vocab_size=len(auxiliary.get_vocab()),
+        master_vocab_size=len(master.get_vocab()) + 1,
+    )
+
+    assert matches.prefix_master_ids.numel() == 0
+    assert 0 in matches.unmatched_ids
 
 
 def test_relative_anchor_sparse_maps_matching_tokens_with_unequal_dimensions():
@@ -416,93 +570,6 @@ def test_relative_anchor_sparse_matches_exact_when_topk_covers_vocab():
 
     assert torch.allclose(sparse, exact, atol=1e-6)
     assert torch.allclose(sparse.sum(dim=-1), torch.ones(1), atol=1e-6)
-
-
-def test_chunked_projection_matches_dense_and_normalizes_rows():
-    spatial = torch.tensor([[0.6, 0.3, 0.1], [0.2, 0.2, 0.6]])
-    auxiliary = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
-    master = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0]])
-    temperature = 0.4
-    vocabulary_map = torch.softmax(
-        F.normalize(auxiliary, dim=-1) @ F.normalize(master, dim=-1).T / temperature,
-        dim=-1,
-    )
-    expected = spatial @ vocabulary_map
-    expected = expected / expected.sum(dim=-1, keepdim=True)
-
-    actual = project_vocab_fused(
-        spatial,
-        auxiliary,
-        master,
-        temperature=temperature,
-        chunk_size=2,
-    )
-
-    assert torch.allclose(actual, expected, atol=1e-6)
-    assert torch.allclose(actual.sum(dim=-1), torch.ones(2))
-    assert actual.shape == (2, 4)
-
-
-def test_sparse_topk_projection_matches_dense_when_topk_covers_vocab():
-    spatial = torch.tensor([[0.6, 0.4], [0.2, 0.8]], dtype=torch.float32)
-    auxiliary = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
-    master = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]],
-        dtype=torch.float32,
-    )
-
-    dense = project_vocab_fused(
-        spatial,
-        auxiliary,
-        master,
-        temperature=0.5,
-        chunk_size=1,
-    )
-    top_indices, top_weights = build_sparse_topk_vocab_projection(
-        F.normalize(auxiliary, dim=-1),
-        F.normalize(master, dim=-1),
-        top_k=master.shape[0],
-        temperature=0.5,
-        chunk_size=1,
-    )
-    sparse = project_vocab_sparse_topk(
-        spatial,
-        top_indices,
-        top_weights,
-        master_vocab_size=master.shape[0],
-        chunk_size=1,
-    )
-
-    assert torch.allclose(sparse, dense, atol=1e-6)
-    assert torch.allclose(sparse.sum(dim=-1), torch.ones(2), atol=1e-6)
-
-
-def test_cache_reuses_pair_signature_and_rejects_malformed_metadata(tmp_path):
-    metadata = {"auxiliary_id": "aux", "master_id": "master", "anchors": 4}
-    calls = 0
-
-    def builder():
-        nonlocal calls
-        calls += 1
-        return torch.eye(2)
-
-    manager = CTCACacheManager(tmp_path)
-    first = manager.get_or_create(metadata, builder)
-    second = CTCACacheManager(tmp_path).get_or_create(metadata, builder)
-    assert torch.equal(first, second)
-    assert calls == 1
-
-    other_metadata = {"auxiliary_id": "other", "master_id": "master", "anchors": 4}
-    assert manager.path_for(metadata) != manager.path_for(other_metadata)
-
-    manager = CTCACacheManager(tmp_path)
-    malformed_metadata = {"pair": "malformed"}
-    torch.save(
-        {"metadata": {"pair": "different"}, "rotation": torch.eye(2)},
-        manager.path_for(malformed_metadata),
-    )
-    with pytest.raises(ValueError, match="Malformed CTCA cache metadata"):
-        manager.get_or_create(malformed_metadata, builder)
 
 
 def test_cache_reuses_tensor_payloads(tmp_path):

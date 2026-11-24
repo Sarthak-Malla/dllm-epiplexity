@@ -73,7 +73,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctca", action="store_true")
     parser.add_argument("--master-model", choices=("a", "b"), default="a")
     parser.add_argument("--ctca-cache-dir", default=".cache/ctca")
-    parser.add_argument("--ctca-force-rebuild", action="store_true")
+    parser.add_argument(
+        "--ctca-force-rebuild",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Rebuild CTCA projection tables at startup.",
+    )
     parser.add_argument("--ctca-anchor-temperature", type=float, default=0.01)
     parser.add_argument("--ctca-projection-temperature", type=float, default=0.05)
     parser.add_argument("--ctca-chunk-size", type=int, default=2500)
@@ -334,8 +339,8 @@ def make_ctca_trace_logger(
 def main() -> None:
     args = parse_args()
     print_import_summary()
-    from dllm.pipelines.tse import TSEConfig, TSESampler
-    from dllm.pipelines.tse.loader import load_tse_models
+    from dllm.pipelines.tse import TSEConfig
+    from dllm.pipelines.tse.loader import build_tse_sampler, load_tse_models
 
     print_device_summary()
 
@@ -406,43 +411,11 @@ def main() -> None:
     print("Prompt token count:", prompt_ids.numel())
     print("Prompt IDs:", prompt_ids.tolist())
 
+    sampler = build_tse_sampler(config, models)
     if args.ctca:
-        from dllm.pipelines.tse import CTCATSESampler
-
-        master_device = getattr(args, f"model_{args.master_model}_device")
-        auxiliary_device = getattr(args, f"model_{auxiliary_name}_device")
-        sampler = CTCATSESampler(
-            models.model_for(args.master_model),
-            models.model_for(auxiliary_name),
-            tokenizer,
-            auxiliary_tokenizer,
-            master_device,
-            auxiliary_device,
-            master_id=args.master_model,
-            auxiliary_id=auxiliary_name,
-            cache_dir=args.ctca_cache_dir,
-            force_rebuild=args.ctca_force_rebuild,
-            anchor_temperature=args.ctca_anchor_temperature,
-            projection_temperature=args.ctca_projection_temperature,
-            projection_chunk_size=args.ctca_chunk_size,
-            projection_mode=args.ctca_projection_mode,
-            projection_top_k=args.ctca_projection_top_k,
-            num_anchors=args.ctca_num_anchors,
-            min_anchors=args.ctca_min_anchors,
-            master_cache_id=getattr(args, f"model_{args.master_model}"),
-            auxiliary_cache_id=getattr(args, f"model_{auxiliary_name}"),
-        )
         print("\nCTCA relative-anchor projection diagnostics:")
         for key, value in sampler.ctca_projection_diagnostics.items():
             print(f"  {key}: {value}")
-    else:
-        sampler = TSESampler(
-            models.model_a,
-            models.model_b,
-            tokenizer,
-            args.model_a_device,
-            args.model_b_device,
-        )
     sampler_inputs: dict[str, Any] = (
         {"auxiliary_inputs": [auxiliary_prompt_ids]}
         if auxiliary_prompt_ids is not None

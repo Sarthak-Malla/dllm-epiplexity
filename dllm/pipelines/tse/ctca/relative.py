@@ -10,11 +10,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .alignment import normalize_token_text
 from dllm.pipelines.tse.utils import timer
 
+from .projection import normalize_projection_rows
 
-RELATIVE_ANCHOR_VERSION = 1
+
+RELATIVE_ANCHOR_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -39,29 +40,22 @@ def collect_relative_anchor_ids(
     num_anchors: int | str = "auto",
     min_anchors: int = 128,
 ) -> RelativeAnchorSelection:
-    """Collect deterministic one-to-one anchors shared by both tokenizers."""
+    """Pair exact non-special vocabulary strings in deterministic order."""
     if min_anchors < 1:
         raise ValueError("min_anchors must be positive")
 
-    def normalized_vocab(tokenizer, vocab_size: int) -> dict[str, int]:
+    def usable_vocab(tokenizer, vocab_size: int) -> dict[str, int]:
         special_ids = set(getattr(tokenizer, "all_special_ids", []))
-        candidates: dict[str, int] = {}
-        for token, token_id in sorted(tokenizer.get_vocab().items(), key=lambda item: item[1]):
-            token_id = int(token_id)
-            normalized = normalize_token_text(str(token))
-            if (
-                not normalized
-                or token_id < 0
-                or token_id >= vocab_size
-                or token_id in special_ids
-            ):
-                continue
-            candidates.setdefault(normalized, token_id)
-        return candidates
+        special_ids.add(getattr(tokenizer, "mask_token_id", None))
+        return {
+            token: token_id
+            for token, token_id in tokenizer.get_vocab().items()
+            if token and 0 <= token_id < vocab_size and token_id not in special_ids
+        }
 
-    auxiliary = normalized_vocab(auxiliary_tokenizer, auxiliary_vocab_size)
-    master = normalized_vocab(master_tokenizer, master_vocab_size)
-    shared = sorted(set(auxiliary).intersection(master))
+    auxiliary = usable_vocab(auxiliary_tokenizer, auxiliary_vocab_size)
+    master = usable_vocab(master_tokenizer, master_vocab_size)
+    shared = sorted(auxiliary.keys() & master.keys())
     selected_count = _selected_anchor_count(num_anchors, len(shared))
     if selected_count < min_anchors:
         raise ValueError(
@@ -115,6 +109,34 @@ def relative_anchor_profiles(
     return F.normalize(profiles, dim=-1)
 
 
+def _master_similarities(
+    auxiliary_profiles: torch.Tensor,
+    master_embeddings: torch.Tensor,
+    master_anchors: torch.Tensor,
+    allowed: torch.Tensor | None,
+    anchor_temperature: float,
+) -> torch.Tensor:
+    master_profiles = relative_anchor_profiles(
+        master_embeddings, master_anchors, temperature=anchor_temperature
+    )
+    similarities = auxiliary_profiles @ master_profiles.transpose(0, 1)
+    if allowed is not None:
+        similarities.masked_fill_(~allowed, -torch.inf)
+    return similarities
+
+
+def _prepare_master_mask(
+    allowed: torch.Tensor | None, vocab_size: int, device: torch.device
+) -> torch.Tensor | None:
+    if allowed is None:
+        return None
+    if allowed.shape != (vocab_size,) or allowed.dtype != torch.bool:
+        raise ValueError("master_token_mask must be a boolean master vocabulary vector")
+    if not allowed.any():
+        raise ValueError("master_token_mask must allow at least one destination")
+    return allowed.to(device)
+
+
 def build_sparse_topk_relative_anchor_projection(
     auxiliary_embeddings: torch.Tensor,
     auxiliary_anchor_embeddings: torch.Tensor,
@@ -125,6 +147,7 @@ def build_sparse_topk_relative_anchor_projection(
     anchor_temperature: float = 0.01,
     projection_temperature: float = 0.05,
     chunk_size: int = 2500,
+    master_token_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build a sparse top-k aux-to-master projection in relative-anchor space."""
     _validate_relative_inputs(
@@ -138,9 +161,17 @@ def build_sparse_topk_relative_anchor_projection(
     )
     if top_k < 1:
         raise ValueError("top_k must be positive")
-    top_k = min(top_k, master_embeddings.shape[0])
-
     device = auxiliary_embeddings.device
+    master_token_mask = _prepare_master_mask(
+        master_token_mask, master_embeddings.shape[0], device
+    )
+    candidate_count = (
+        master_embeddings.shape[0]
+        if master_token_mask is None
+        else int(master_token_mask.sum())
+    )
+    top_k = min(top_k, candidate_count)
+    auxiliary_anchor_embeddings = auxiliary_anchor_embeddings.to(device)
     master_anchor_embeddings = master_anchor_embeddings.to(device)
     top_indices_by_chunk = []
     top_weights_by_chunk = []
@@ -167,12 +198,18 @@ def build_sparse_topk_relative_anchor_projection(
             )
             for master_start in range(0, master_embeddings.shape[0], chunk_size):
                 master_end = min(master_start + chunk_size, master_embeddings.shape[0])
-                master_profiles = relative_anchor_profiles(
+                allowed = (
+                    None
+                    if master_token_mask is None
+                    else master_token_mask[master_start:master_end]
+                )
+                similarities = _master_similarities(
+                    auxiliary_profiles,
                     master_embeddings[master_start:master_end].to(device),
                     master_anchor_embeddings,
-                    temperature=anchor_temperature,
+                    allowed,
+                    anchor_temperature,
                 )
-                similarities = auxiliary_profiles @ master_profiles.transpose(0, 1)
                 local_k = min(top_k, similarities.shape[1])
                 local_values, local_indices = torch.topk(similarities, k=local_k, dim=-1)
                 local_indices = local_indices + master_start
@@ -200,6 +237,8 @@ def project_vocab_relative_exact(
     projection_temperature: float = 0.05,
     chunk_size: int = 2500,
     epsilon: float = 1e-9,
+    normalize: bool = True,
+    master_token_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Project probabilities through full relative-anchor similarities.
 
@@ -226,6 +265,9 @@ def project_vocab_relative_exact(
     )
 
     device = spatial_probabilities.device
+    master_token_mask = _prepare_master_mask(
+        master_token_mask, master_embeddings.shape[0], device
+    )
     probabilities = spatial_probabilities.float()
     auxiliary_embeddings = auxiliary_embeddings.to(device)
     auxiliary_anchor_embeddings = auxiliary_anchor_embeddings.to(device)
@@ -247,6 +289,19 @@ def project_vocab_relative_exact(
                     auxiliary_anchor_embeddings,
                     temperature=anchor_temperature,
                 )
+
+            def projection_logits(start: int, end: int) -> torch.Tensor:
+                allowed = (
+                    None if master_token_mask is None else master_token_mask[start:end]
+                )
+                return _master_similarities(
+                    auxiliary_profiles,
+                    master_embeddings[start:end],
+                    master_anchor_embeddings,
+                    allowed,
+                    anchor_temperature,
+                ) / projection_temperature
+
             log_denominator = torch.full(
                 (auxiliary_profiles.shape[0],),
                 -torch.inf,
@@ -256,14 +311,7 @@ def project_vocab_relative_exact(
             with timer("ctca.relative.exact_logsumexp"):
                 for master_start in range(0, master_embeddings.shape[0], chunk_size):
                     master_end = min(master_start + chunk_size, master_embeddings.shape[0])
-                    master_profiles = relative_anchor_profiles(
-                        master_embeddings[master_start:master_end],
-                        master_anchor_embeddings,
-                        temperature=anchor_temperature,
-                    )
-                    logits = (
-                        auxiliary_profiles @ master_profiles.transpose(0, 1)
-                    ) / projection_temperature
+                    logits = projection_logits(master_start, master_end)
                     log_denominator = torch.logaddexp(
                         log_denominator, torch.logsumexp(logits, dim=-1)
                     )
@@ -271,26 +319,16 @@ def project_vocab_relative_exact(
             active_probabilities = probabilities[:, auxiliary_start:auxiliary_end]
             for master_start in range(0, master_embeddings.shape[0], chunk_size):
                 master_end = min(master_start + chunk_size, master_embeddings.shape[0])
-                master_profiles = relative_anchor_profiles(
-                    master_embeddings[master_start:master_end],
-                    master_anchor_embeddings,
-                    temperature=anchor_temperature,
-                )
-                logits = (
-                    auxiliary_profiles @ master_profiles.transpose(0, 1)
-                ) / projection_temperature
+                logits = projection_logits(master_start, master_end)
                 weights = torch.exp(logits - log_denominator.unsqueeze(-1))
                 projected[:, master_start:master_end].add_(
                     active_probabilities @ weights
                 )
 
-    with timer("ctca.projection.normalize"):
-        row_mass = projected.sum(dim=-1, keepdim=True)
-        return torch.where(
-            row_mass > epsilon,
-            projected / row_mass.clamp_min(epsilon),
-            projected,
-        )
+    if normalize:
+        with timer("ctca.projection.normalize"):
+            return normalize_projection_rows(projected, epsilon)
+    return projected
 
 
 def _validate_relative_inputs(

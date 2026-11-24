@@ -5,6 +5,7 @@ Run the focused tests with:
 """
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Sequence
 
 import torch
@@ -38,7 +39,6 @@ class ModelCanvasView:
 class CachedCanvasRun:
     """Retokenized representation of one committed master-token run."""
 
-    text: str
     encoded_ids: tuple[int, ...]
     character_offsets: tuple[Span, ...]
     prefix_boundaries: tuple[int, ...]
@@ -52,7 +52,7 @@ def _validate_offsets(offsets: Sequence[Span], name: str) -> None:
         if len(span) != 2:
             raise ValueError(f"{name}[{index}] must contain a start and end")
         start, end = float(span[0]), float(span[1])
-        if not torch.isfinite(torch.tensor([start, end])).all():
+        if not isfinite(start) or not isfinite(end):
             raise ValueError(f"{name}[{index}] must be finite")
         if start < 0 or end < start:
             raise ValueError(f"{name}[{index}] is not a valid non-negative span")
@@ -218,11 +218,13 @@ def build_model_canvas_view(
     master_mask_token_id: int,
     model_mask_token_id: int,
     run_cache: CanvasRunCache | None = None,
+    master_range: range | None = None,
 ) -> ModelCanvasView:
     """Derive a native model view.
 
     Committed master runs are decoded and retokenized by the target tokenizer.
     Every unresolved logical slot is represented by exactly one native mask ID.
+    The overlap columns can be limited to the master slots being scored.
     """
     with timer("ctca.canvas.input_conversion"):
         prompt_ids = torch.as_tensor(native_prompt_ids, dtype=torch.long).flatten().tolist()
@@ -268,7 +270,6 @@ def build_model_canvas_view(
                 with timer("ctca.canvas.prefix_boundaries"):
                     boundaries = tuple(_prefix_boundaries(master_tokenizer, run_ids))
                 cached_run = CachedCanvasRun(
-                    text=run_text,
                     encoded_ids=tuple(int(token_id) for token_id in encoded_ids),
                     character_offsets=tuple(
                         (float(start), float(end))
@@ -296,9 +297,9 @@ def build_model_canvas_view(
     with timer("ctca.canvas.finalize_view"):
         all_ids = torch.tensor(prompt_ids + native_generated_ids, dtype=torch.long)
         attention_mask = torch.ones_like(all_ids)
-        master_offsets = tuple(
-            (float(i), float(i + 1)) for i in range(len(generated_ids))
-        )
+        if master_range is None:
+            master_range = range(len(generated_ids))
+        master_offsets = tuple((float(i), float(i + 1)) for i in master_range)
     with timer("ctca.canvas.overlap_matrix"):
         overlap = build_canvas_overlap_matrix(native_offsets, master_offsets)
     return ModelCanvasView(

@@ -1,6 +1,32 @@
-"""Confidence and consensus scoring for TSE position selection."""
+"""Confidence and consensus scoring for TSE position selection.
+
+Run with: python -m pytest scripts/tests/test_tse_components.py
+"""
 
 import torch
+
+from dllm.core.samplers.utils import add_gumbel_noise
+
+from .divergence import agreement_factor, jensen_shannon_divergence
+
+
+def baseline_candidates(
+    probabilities: torch.Tensor, temperature: float, remasking: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Predict baseline tokens and score their positions for commitment."""
+    if temperature == 0:
+        scores, tokens = probabilities.max(dim=-1)
+    else:
+        predictions = add_gumbel_noise(probabilities.log(), temperature)
+        predictions.masked_fill_(probabilities == 0, -torch.inf)
+        tokens = predictions.argmax(dim=-1)
+        scores = probabilities.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)
+
+    if remasking == "random":
+        scores = torch.rand_like(scores)
+    elif remasking != "low_confidence":
+        raise ValueError(f"Unsupported remasking strategy: {remasking}")
+    return scores, tokens
 
 
 def fused_confidence(
@@ -27,3 +53,17 @@ def consensus_scores(
     if not torch.isfinite(confidence).all() or not torch.isfinite(agreement).all():
         raise ValueError("confidence and agreement must be finite")
     return confidence.float() * agreement.float()
+
+
+def distribution_consensus(
+    confidence: torch.Tensor,
+    probabilities_a: torch.Tensor,
+    probabilities_b: torch.Tensor,
+    weights_a: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Compute the agreement-weighted confidence used in diagnostics."""
+    divergence = jensen_shannon_divergence(
+        probabilities_a, probabilities_b, weights_a, epsilon
+    )
+    return consensus_scores(confidence, agreement_factor(divergence, weights_a, epsilon))

@@ -2,9 +2,13 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from dllm.pipelines.tse import ctca_sampler as ctca_sampler_module
+from dllm.pipelines.tse import eval as tse_eval
+from dllm.pipelines.tse import loader
+from dllm.pipelines.tse import scoring
 from dllm.pipelines.tse.ctca_sampler import CTCATSESampler
 from dllm.pipelines.tse.sampler import TSESampler
 
@@ -182,7 +186,7 @@ def test_ctca_sampler_ranks_positions_by_fused_top_probability(monkeypatch):
         min_anchors=3,
     )
     monkeypatch.setattr(
-        ctca_sampler_module,
+        scoring,
         "agreement_factor",
         lambda divergence, *args: torch.zeros_like(divergence),
     )
@@ -456,13 +460,253 @@ def test_homogeneous_sampler_regression_still_commits_equal_vocabularies():
     sampler = TSESampler(model_a, model_b, tokenizer, "cpu", "cpu")
 
     generated = sampler.sample(
-        [torch.tensor([0])],
+        [torch.tensor([0, tokenizer.mask_token_id]), torch.tensor([1])],
         max_new_tokens=2,
         steps=2,
-        block_size=2,
+        block_size=1,
         selection_mode="tse",
+        capture_logits=True,
     )
 
-    output = generated[0, 1:]
-    assert output.tolist() == [0, 0]
-    assert not torch.any(output == tokenizer.mask_token_id)
+    assert generated.tolist() == [
+        [0, tokenizer.mask_token_id, 0, 0],
+        [1, 0, 0, tokenizer.pad_token_id],
+    ]
+    assert sampler.last_paired_logits[0][0].tolist() == [[0, 2], [0, 3], [1, 1], [1, 2]]
+
+
+def test_sampler_counts_consecutive_right_masks_across_blocks():
+    master = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    auxiliary = CharacterTokenizer(["a", "b", "c", "ab"], "<mask>", "<pad>")
+    sampler = CTCATSESampler(
+        FixedMaskedModel(len(master.get_vocab())),
+        FixedMaskedModel(len(auxiliary.get_vocab()), preferred_token_id=3),
+        master,
+        auxiliary,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        min_anchors=3,
+        projection_temperature=0.5,
+    )
+    mask = master.mask_token_id
+    canvas = torch.tensor(
+        [
+            [2, mask, mask, mask, mask, master.pad_token_id],
+            [0, 1, mask, 1, mask, mask],
+        ]
+    )
+    attention = torch.tensor([[1, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]])
+    trace = {}
+    _, projected, positions = sampler._forward_aligned_probabilities(
+        canvas,
+        attention,
+        [1, 2],
+        [torch.tensor([2]), torch.tensor([0, 1])],
+        max_new_tokens=4,
+        projection_range=range(0, 3),
+        temperature_master=1.0,
+        temperature_auxiliary=1.0,
+        fusion_device=torch.device("cpu"),
+        trace_callback=lambda event, payload: trace.update(payload),
+    )
+
+    assert positions.tolist() == [[0, 1], [0, 2], [0, 3], [1, 2], [1, 4]]
+    assert trace["masked_slots_to_right"].tolist() == [3, 2, 1, 0, 1]
+    assert (projected[[0, 1, 2, 4], 0] > projected[3, 0]).all()
+
+    sampler.sample(
+        [[2]],
+        max_new_tokens=2,
+        steps=2,
+        block_size=1,
+        capture_logits=True,
+    )
+    first_step, second_step = sampler.last_aligned_probabilities
+    assert first_step[2][0, 0] > second_step[2][0, 0]
+
+
+@pytest.mark.parametrize("ctca", [False, True])
+@pytest.mark.parametrize("selection_mode", ["baseline", "tse"])
+def test_sampler_resolves_all_slots_when_both_models_prefer_masks(ctca, selection_mode):
+    master = CharacterTokenizer(["a", "b"], "[MASK]", "[PAD]")
+    auxiliary = (
+        CharacterTokenizer(["a", "b", "c"], "<mask>", "<pad>") if ctca else master
+    )
+    model_a = FixedMaskedModel(
+        len(master.get_vocab()), preferred_token_id=master.mask_token_id
+    )
+    model_b = FixedMaskedModel(
+        len(auxiliary.get_vocab()), preferred_token_id=auxiliary.mask_token_id
+    )
+    if ctca:
+        sampler = CTCATSESampler(
+            model_a,
+            model_b,
+            master,
+            auxiliary,
+            "cpu",
+            "cpu",
+            master_id="a",
+            auxiliary_id="b",
+            cache_dir=None,
+            min_anchors=2,
+        )
+    else:
+        sampler = TSESampler(model_a, model_b, master, "cpu", "cpu")
+    generated = sampler.sample(
+        [[master.mask_token_id, 0]],
+        max_new_tokens=4,
+        steps=4,
+        block_size=2,
+        selection_mode=selection_mode,
+        baseline_model="b",
+        temperature=0.8,
+        capture_logits=True,
+    )
+
+    assert generated[0, :2].tolist() == [master.mask_token_id, 0]
+    assert (generated[0, 2:] != master.mask_token_id).all()
+    if ctca:
+        for _, master_probs, auxiliary_probs in sampler.last_aligned_probabilities:
+            assert (master_probs[:, master.mask_token_id] == 0).all()
+            assert (auxiliary_probs[:, master.mask_token_id] == 0).all()
+
+
+def test_dream_logits_predict_the_following_canvas_slot():
+    class PositionModel(FixedMaskedModel):
+        def forward(self, input_ids, attention_mask=None):
+            return SimpleNamespace(
+                logits=torch.nn.functional.one_hot(
+                    input_ids, num_classes=self.config.vocab_size
+                ).float()
+            )
+
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    dream = PositionModel(len(tokenizer.get_vocab()))
+    dream.config.model_type = "Dream"
+    same_position = PositionModel(len(tokenizer.get_vocab()))
+    sampler = TSESampler(dream, same_position, tokenizer, "cpu", "cpu")
+    input_ids = torch.tensor([[0, 1, 2]])
+
+    dream_logits, other_logits = sampler.forward_pair(input_ids, torch.ones_like(input_ids))
+
+    assert dream_logits.argmax(dim=-1).tolist() == [[0, 0, 1]]
+    assert torch.equal(other_logits.argmax(dim=-1), input_ids)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [("llada", [1, 2, 0, 1]), ("Dream", [0, 1, 2, 0])],
+)
+def test_single_checkpoint_greedy_matches_ctca_master_endpoint(
+    monkeypatch, model_type, expected
+):
+    class PositionModel(FixedMaskedModel):
+        def __init__(self, tokenizer):
+            super().__init__(len(tokenizer.get_vocab()) + 1)
+            self.config.model_type = model_type
+            self.mask_id = tokenizer.mask_token_id
+            self.calls = 0
+
+        def forward(self, input_ids, attention_mask=None):
+            self.calls += 1
+            logits = torch.zeros(*input_ids.shape, self.config.vocab_size)
+            positions = torch.arange(input_ids.shape[1]).expand_as(input_ids)
+            logits.scatter_(-1, (positions % 3).unsqueeze(-1), 5.0)
+            logits[..., self.mask_id :] = 50
+            return SimpleNamespace(logits=logits)
+
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    model = PositionModel(tokenizer)
+    loaded = []
+
+    def get_model(args, **kwargs):
+        loaded.append(args.model_name_or_path)
+        return model
+
+    monkeypatch.setattr(loader, "get_model", get_model)
+    monkeypatch.setattr(loader, "get_tokenizer", lambda args: tokenizer)
+    monkeypatch.setattr(
+        tse_eval.accelerate,
+        "Accelerator",
+        lambda: SimpleNamespace(process_index=0, num_processes=1),
+    )
+    harness = tse_eval.TSEEvalHarness(pretrained="fixture/model", device="cpu")
+    sampling_kwargs = dict(max_new_tokens=4, steps=4, block_size=2)
+    greedy = harness.sampler.sample(
+        [[0]],
+        **sampling_kwargs,
+        selection_mode=harness.selection_mode,
+        baseline_model=harness.baseline_model,
+    )
+
+    assert loaded == ["fixture/model"]
+    assert model.calls == 4
+    assert greedy[0, 1:].tolist() == expected
+
+    aux_tokenizer = CharacterTokenizer(["a", "b", "c", "d"], "<mask>", "<pad>")
+    endpoint = CTCATSESampler(
+        model,
+        FixedMaskedModel(len(aux_tokenizer.get_vocab())),
+        tokenizer,
+        aux_tokenizer,
+        "cpu",
+        "cpu",
+        master_id="a",
+        auxiliary_id="b",
+        cache_dir=None,
+        min_anchors=3,
+    )
+    assert torch.equal(endpoint.sample([[0]], **sampling_kwargs, alpha=1.0), greedy)
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["local", "unversioned", "hub_revision"])
+def test_startup_rebuilds_projection_unless_disk_reuse_is_requested(
+    tmp_path, monkeypatch, checkpoint_kind
+):
+    tokenizer = CharacterTokenizer(["a", "b"], "[MASK]", "[PAD]")
+    model_a = FixedMaskedModel(len(tokenizer.get_vocab()))
+    model_b = FixedMaskedModel(len(tokenizer.get_vocab()))
+    cache_dir = tmp_path / "projections"
+    names = ("org/model-a", "org/model-b")
+    for model, name in zip((model_a, model_b), names):
+        if checkpoint_kind == "local":
+            path = tmp_path / name
+            path.mkdir(parents=True)
+            model.config._name_or_path = str(path)
+        else:
+            model.config._name_or_path = name
+        if checkpoint_kind != "unversioned":
+            model.config._commit_hash = "revision"
+
+    def build_sampler(**kwargs):
+        return CTCATSESampler(
+            model_a, model_b, tokenizer, tokenizer, "cpu", "cpu",
+            master_id="a", auxiliary_id="b", cache_dir=str(cache_dir), min_anchors=2,
+            master_cache_id=names[0], auxiliary_cache_id=names[1],
+            **kwargs,
+        )
+
+    first = build_sampler()
+    assert first.ctca_projection_diagnostics["projection_version"] == 42
+    assert first.ctca_projection_diagnostics["sparse_topk_cache_rebuilt"]["cpu"]
+    assert build_sampler().ctca_projection_diagnostics["sparse_topk_cache_rebuilt"]["cpu"]
+
+    def unexpected_rebuild(*args):
+        pytest.fail("projection was rebuilt again inside the same run")
+
+    monkeypatch.setattr(first.aligner, "_build_sparse_tables", unexpected_rebuild)
+    first.aligner.warm_projection_cache(
+        first._aligner_auxiliary_id, torch.device("cpu:0")
+    )
+
+    reused = build_sampler(force_rebuild=False)
+    rebuilt = reused.ctca_projection_diagnostics["sparse_topk_cache_rebuilt"]["cpu"]
+    assert rebuilt == (checkpoint_kind != "hub_revision")
+    if checkpoint_kind == "hub_revision":
+        assert len(list(cache_dir.glob("decoded_relative_sparse_topk_v42_*.pt"))) == 1
+    else:
+        assert not cache_dir.exists()

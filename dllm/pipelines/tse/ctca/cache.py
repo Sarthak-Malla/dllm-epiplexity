@@ -7,6 +7,7 @@ Run the focused tests with:
 import hashlib
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Callable
 
 import torch
@@ -23,7 +24,7 @@ class CTCACacheManager:
     ) -> None:
         self.cache_dir = Path(cache_dir).expanduser() if cache_dir is not None else None
         self.force_rebuild = force_rebuild
-        self._memory: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {}
+        self._memory: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
 
     @staticmethod
     def signature(metadata: dict) -> str:
@@ -33,43 +34,10 @@ class CTCACacheManager:
             raise ValueError("cache metadata must be JSON serializable") from error
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def path_for(self, metadata: dict, artifact: str = "procrustes_R") -> Path | None:
+    def path_for(self, metadata: dict, artifact: str) -> Path | None:
         if self.cache_dir is None:
             return None
         return self.cache_dir / f"{artifact}_{self.signature(metadata)}.pt"
-
-    def get_or_create(
-        self,
-        metadata: dict,
-        builder: Callable[[], torch.Tensor],
-    ) -> torch.Tensor:
-        """Return a cached CPU tensor or build and persist it."""
-        key = self.signature(metadata)
-        if not self.force_rebuild and key in self._memory:
-            cached = self._memory[key]
-            if not isinstance(cached, torch.Tensor):
-                raise ValueError("CTCA cache key collision between tensor payload types")
-            return cached
-
-        path = self.path_for(metadata)
-        if not self.force_rebuild and path is not None and path.exists():
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-            if not isinstance(payload, dict) or payload.get("metadata") != metadata:
-                raise ValueError(f"Malformed CTCA cache metadata in {path}")
-            rotation = payload.get("rotation")
-            if not isinstance(rotation, torch.Tensor) or rotation.ndim != 2:
-                raise ValueError(f"Malformed CTCA rotation in {path}")
-            self._memory[key] = rotation
-            return rotation
-
-        rotation = builder().detach().float().cpu()
-        if rotation.ndim != 2 or not torch.isfinite(rotation).all():
-            raise ValueError("CTCA cache builder must return a finite matrix")
-        self._memory[key] = rotation
-        if path is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"metadata": metadata, "rotation": rotation}, path)
-        return rotation
 
     def get_or_create_tensors(
         self,
@@ -79,12 +47,12 @@ class CTCACacheManager:
         builder: Callable[[], dict[str, torch.Tensor]],
         required_keys: tuple[str, ...],
     ) -> tuple[dict[str, torch.Tensor], bool]:
-        """Return a cached CPU tensor payload and whether it was rebuilt."""
-        key = f"{artifact}:{self.signature(metadata)}"
-        if not self.force_rebuild and key in self._memory:
+        """Return a current-run CPU payload, optionally loading it from disk."""
+        key = (artifact, self.signature(metadata))
+        if key in self._memory:
             cached = self._memory[key]
-            if not isinstance(cached, dict):
-                raise ValueError("CTCA cache key collision between tensor payload types")
+            if not all(name in cached for name in required_keys):
+                raise ValueError("CTCA cache payload is missing required tensors")
             return cached, False
 
         path = self.path_for(metadata, artifact=artifact)
@@ -102,10 +70,16 @@ class CTCACacheManager:
         tensors = builder()
         self._validate_tensor_payload(tensors, required_keys, None)
         tensors = {name: tensor.detach().cpu() for name, tensor in tensors.items()}
-        self._memory[key] = tensors
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"metadata": metadata, "tensors": tensors}, path)
+            with NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+                temporary_path = Path(handle.name)
+            try:
+                torch.save({"metadata": metadata, "tensors": tensors}, temporary_path)
+                temporary_path.replace(path)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        self._memory[key] = tensors
         return tensors, True
 
     @staticmethod
@@ -124,10 +98,15 @@ class CTCACacheManager:
 
 
 def tokenizer_vocab_signature(tokenizer) -> str:
-    """Hash a tokenizer vocabulary independently of dictionary ordering."""
+    """Hash a tokenizer vocabulary and its special IDs."""
     vocabulary = sorted(
         (str(token), int(token_id))
         for token, token_id in tokenizer.get_vocab().items()
     )
-    payload = json.dumps(vocabulary, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return CTCACacheManager.signature(
+        {
+            "vocabulary": vocabulary,
+            "special_ids": sorted(set(getattr(tokenizer, "all_special_ids", ()))),
+            "mask_token_id": getattr(tokenizer, "mask_token_id", None),
+        }
+    )

@@ -109,9 +109,10 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TSE_TIMERS=1
 export CTCA_CANVAS_WORKERS="${ctca_canvas_workers}"
 
-REBUILD_ARGS=()
 if [[ "${ctca_force_rebuild}" == "true" ]]; then
-    REBUILD_ARGS+=(--ctca-force-rebuild)
+    REBUILD_FLAG=--ctca-force-rebuild
+else
+    REBUILD_FLAG=--no-ctca-force-rebuild
 fi
 
 python scripts/tse/smoke.py \
@@ -144,4 +145,4 @@ python scripts/tse/smoke.py \
     --ctca-num-anchors "${ctca_num_anchors}" \
     --ctca-min-anchors "${ctca_min_anchors}" \
     --question "${question}" \
-    "${REBUILD_ARGS[@]}"
+    "${REBUILD_FLAG}"

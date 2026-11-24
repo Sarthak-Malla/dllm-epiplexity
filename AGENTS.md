@@ -12,3 +12,4 @@
 # Agent Guidelines
 - Never run a salloc, sbatch or srun command on your own. Give the commands to run to the user so they can run them for you.
 - When checking things in the GPU or the server machine, NEVER use CUDA_VISIBLE_DEVICES anywhere.
+- This is a login node, so NEVER run intensive commands here.

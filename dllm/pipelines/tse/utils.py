@@ -12,6 +12,35 @@ import time
 import torch
 
 
+def initialize_canvas(
+    prompts: list[torch.Tensor],
+    max_new_tokens: int,
+    mask_id: int,
+    pad_id: int,
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Right-pad prompts followed by the same number of generation slots."""
+    prompt_lens = [prompt.numel() for prompt in prompts]
+    canvas = prompts[0].new_full((len(prompts), max(prompt_lens) + max_new_tokens), pad_id)
+    attention_mask = torch.zeros_like(canvas)
+    for index, (prompt, length) in enumerate(zip(prompts, prompt_lens)):
+        end = length + max_new_tokens
+        canvas[index, :length] = prompt
+        canvas[index, length:end] = mask_id
+        attention_mask[index, :end] = 1
+    return canvas, attention_mask, prompt_lens
+
+
+def forward_token_logits(
+    model: torch.nn.Module, canvas: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    """Return logits indexed by the token position they predict."""
+    logits = model(canvas, attention_mask=attention_mask).logits
+    if getattr(getattr(model, "config", None), "model_type", "") in {"Dream", "dream"}:
+        # Dream's native sampler uses the preceding position's logits.
+        logits = torch.cat((logits[:, :1], logits[:, :-1]), dim=1)
+    return logits
+
+
 def _timers_enabled() -> bool:
     return os.environ.get("TSE_TIMERS", "").casefold() in {"1", "true", "yes", "on"}
 

@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from dllm.pipelines.tse.ctca.alignment import normalize_token_text
+from dllm.pipelines.tse.ctca.relative import collect_relative_anchor_ids
 
 
 DEFAULT_LLADA = "GSAI-ML/LLaDA-8B-Instruct"
@@ -144,67 +144,6 @@ def mask_token_id(tokenizer, *, fallback: int | None = None) -> int | None:
     if fallback is not None and 0 <= fallback < len(tokenizer):
         return int(fallback)
     return None
-
-
-def collect_all_shared_anchors(
-    auxiliary_tokenizer,
-    master_tokenizer,
-    *,
-    auxiliary_vocab_size: int,
-    master_vocab_size: int,
-) -> tuple[list[int], list[int]]:
-    """Collect all deterministic one-to-one shared string anchors."""
-
-    def normalized_vocab(tokenizer, vocab_size: int) -> dict[str, int]:
-        special_ids = set(getattr(tokenizer, "all_special_ids", []))
-        candidates: dict[str, int] = {}
-        for token, token_id in sorted(tokenizer.get_vocab().items(), key=lambda item: item[1]):
-            token_id = int(token_id)
-            normalized = normalize_token_text(token)
-            if (
-                not normalized
-                or token_id < 0
-                or token_id >= vocab_size
-                or token_id in special_ids
-            ):
-                continue
-            candidates.setdefault(normalized, token_id)
-        return candidates
-
-    auxiliary = normalized_vocab(auxiliary_tokenizer, auxiliary_vocab_size)
-    master = normalized_vocab(master_tokenizer, master_vocab_size)
-    shared = sorted(set(auxiliary).intersection(master))
-    return [auxiliary[token] for token in shared], [master[token] for token in shared]
-
-
-def select_anchor_ids(
-    auxiliary_anchor_ids: Sequence[int],
-    master_anchor_ids: Sequence[int],
-    num_anchors: str,
-    *,
-    min_anchors: int,
-) -> tuple[list[int], list[int]]:
-    if min_anchors < 1:
-        raise ValueError("min_anchors must be positive")
-    if num_anchors.casefold() == "auto":
-        selected_count = len(auxiliary_anchor_ids)
-    else:
-        try:
-            selected_count = int(num_anchors)
-        except ValueError as error:
-            raise ValueError("--num-anchors must be an integer or 'auto'") from error
-        if selected_count < 1:
-            raise ValueError("--num-anchors must be positive or 'auto'")
-        selected_count = min(selected_count, len(auxiliary_anchor_ids))
-    if selected_count < min_anchors:
-        raise ValueError(
-            "relative-anchor alignment found too few shared anchors: "
-            f"{selected_count} < {min_anchors}"
-        )
-    return (
-        list(auxiliary_anchor_ids[:selected_count]),
-        list(master_anchor_ids[:selected_count]),
-    )
 
 
 def decode(tokenizer, token_ids: Sequence[int]) -> str:
@@ -437,22 +376,21 @@ def main() -> None:
     print(f"  dtype: {args.dtype}")
     print(f"  device: {args.device}")
 
-    all_auxiliary_anchor_ids, all_master_anchor_ids = collect_all_shared_anchors(
+    anchors = collect_relative_anchor_ids(
         auxiliary_tokenizer,
         master_tokenizer,
         auxiliary_vocab_size=auxiliary_embeddings.shape[0],
         master_vocab_size=master_embeddings.shape[0],
-    )
-    auxiliary_anchor_ids, master_anchor_ids = select_anchor_ids(
-        all_auxiliary_anchor_ids,
-        all_master_anchor_ids,
-        args.num_anchors,
+        num_anchors=args.num_anchors,
         min_anchors=args.min_anchors,
     )
-    print(f"\nTotal usable shared anchors: {len(all_auxiliary_anchor_ids)}")
-    print(f"Anchors selected by --num-anchors: {len(auxiliary_anchor_ids)}")
+    print(f"\nTotal usable shared anchors: {anchors.total_anchors}")
+    print(f"Anchors selected by --num-anchors: {anchors.selected_anchors}")
     print("First anchors:")
-    for aux_id, master_id in list(zip(all_auxiliary_anchor_ids, all_master_anchor_ids))[:10]:
+    for aux_id, master_id in zip(
+        anchors.auxiliary_anchor_ids[:10].tolist(),
+        anchors.master_anchor_ids[:10].tolist(),
+    ):
         print(
             "  "
             f"{token_label(auxiliary_tokenizer, aux_id, mask_ids[auxiliary_name])} "
@@ -472,12 +410,8 @@ def main() -> None:
     query_ids = torch.tensor(
         auxiliary_token_ids, dtype=torch.long, device=auxiliary_embeddings.device
     )
-    auxiliary_anchor_index = torch.tensor(
-        auxiliary_anchor_ids, dtype=torch.long, device=auxiliary_embeddings.device
-    )
-    master_anchor_index = torch.tensor(
-        master_anchor_ids, dtype=torch.long, device=master_embeddings.device
-    )
+    auxiliary_anchor_index = anchors.auxiliary_anchor_ids.to(auxiliary_embeddings.device)
+    master_anchor_index = anchors.master_anchor_ids.to(master_embeddings.device)
     auxiliary_queries = auxiliary_embeddings.index_select(0, query_ids)
     auxiliary_anchor_embeddings = auxiliary_embeddings.index_select(
         0, auxiliary_anchor_index

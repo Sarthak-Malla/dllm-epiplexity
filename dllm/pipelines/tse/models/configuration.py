@@ -12,7 +12,7 @@ class TSEConfig:
     """Runtime configuration for synchronized TSE inference."""
 
     model_a_path: str
-    model_b_path: str
+    model_b_path: str | None
     model_a_device: str = "cuda:0"
     model_b_device: str = "cuda:1"
     dtype: str = "bfloat16"
@@ -34,7 +34,7 @@ class TSEConfig:
     ctca_enabled: bool = False
     master_model: str = "a"
     ctca_cache_dir: str | None = ".cache/ctca"
-    ctca_force_rebuild: bool = False
+    ctca_force_rebuild: bool = True
     ctca_anchor_temperature: float = 0.01
     ctca_projection_temperature: float = 0.05
     ctca_chunk_size: int = 2500

@@ -12,7 +12,9 @@ from dllm.utils.configs import ModelArguments
 from dllm.utils.models import get_model, get_tokenizer
 
 from .ctca.canvas import encode_with_offsets
+from .ctca_sampler import CTCATSESampler
 from .models import TSEConfig
+from .sampler import TSESampler
 
 
 @dataclass
@@ -24,7 +26,7 @@ class TSEModels:
 
     @property
     def tokenizer(self) -> transformers.PreTrainedTokenizerBase:
-        """Return the legacy canonical tokenizer used by homogeneous TSE."""
+        """Return the shared tokenizer used by homogeneous TSE."""
         return self.tokenizer_b
 
     def model_for(self, name: str):
@@ -52,6 +54,8 @@ def _device_map(device: str):
 
 def load_tse_models(config: TSEConfig) -> TSEModels:
     """Load both models and their native tokenizers with explicit placement."""
+    if config.model_b_path is None:
+        raise ValueError("Paired TSE requires a Model B checkpoint")
     _validate_config(config)
     model_a_args = ModelArguments(
         model_name_or_path=config.model_a_path,
@@ -72,14 +76,11 @@ def load_tse_models(config: TSEConfig) -> TSEModels:
     )
 
     tokenizer_b = get_tokenizer(model_b_args)
-    if config.ctca_enabled:
-        tokenizer_a = (
-            tokenizer_b
-            if config.model_a_path == config.model_b_path
-            else get_tokenizer(model_a_args)
-        )
-    else:
-        tokenizer_a = tokenizer_b
+    tokenizer_a = (
+        tokenizer_b
+        if config.model_a_path == config.model_b_path
+        else get_tokenizer(model_a_args)
+    )
     _validate_compatibility(
         model_a,
         model_b,
@@ -92,6 +93,52 @@ def load_tse_models(config: TSEConfig) -> TSEModels:
         model_b=model_b,
         tokenizer_a=tokenizer_a,
         tokenizer_b=tokenizer_b,
+    )
+
+
+def load_tse_baseline(config: TSEConfig) -> TSESampler:
+    """Load one checkpoint for the shared greedy decoding loop."""
+    args = ModelArguments(model_name_or_path=config.model_a_path, dtype=config.dtype)
+    model = get_model(args, device_map=_device_map(config.model_a_device))
+    tokenizer = get_tokenizer(args)
+    _validate_model(model, tokenizer, "A", require_mask=True, require_ctca=False)
+    return TSESampler(model, None, tokenizer, config.model_a_device)
+
+
+def build_tse_sampler(config: TSEConfig, models: TSEModels) -> TSESampler | CTCATSESampler:
+    """Build the sampler shared by evaluation and smoke tests."""
+    if not config.ctca_enabled:
+        return TSESampler(
+            models.model_a,
+            models.model_b,
+            models.tokenizer,
+            config.model_a_device,
+            config.model_b_device,
+        )
+
+    master = config.master_model
+    auxiliary = "b" if master == "a" else "a"
+    return CTCATSESampler(
+        models.model_for(master),
+        models.model_for(auxiliary),
+        models.tokenizer_for(master),
+        models.tokenizer_for(auxiliary),
+        getattr(config, f"model_{master}_device"),
+        getattr(config, f"model_{auxiliary}_device"),
+        master_id=master,
+        auxiliary_id=auxiliary,
+        cache_dir=config.ctca_cache_dir,
+        force_rebuild=config.ctca_force_rebuild,
+        anchor_temperature=config.ctca_anchor_temperature,
+        projection_temperature=config.ctca_projection_temperature,
+        projection_chunk_size=config.ctca_chunk_size,
+        projection_mode=config.ctca_projection_mode,
+        projection_top_k=config.ctca_projection_top_k,
+        num_anchors=config.ctca_num_anchors,
+        min_anchors=config.ctca_min_anchors,
+        master_cache_id=getattr(config, f"model_{master}_path"),
+        auxiliary_cache_id=getattr(config, f"model_{auxiliary}_path"),
+        fusion_device=config.fusion_device,
     )
 
 
@@ -188,7 +235,8 @@ def _validate_compatibility(
     *,
     ctca_enabled: bool = False,
 ) -> None:
-    tokenizer_b = tokenizer_b or tokenizer_a
+    if tokenizer_b is None:
+        tokenizer_b = tokenizer_a
     vocab_a = int(model_a.config.vocab_size)
     vocab_b = int(model_b.config.vocab_size)
     if not ctca_enabled and vocab_a != vocab_b:
@@ -196,6 +244,11 @@ def _validate_compatibility(
             "TSE models must have equal config vocab sizes: "
             f"{vocab_a} != {vocab_b}"
         )
+    if not ctca_enabled and tokenizer_a is not tokenizer_b and (
+        tokenizer_a.get_vocab() != tokenizer_b.get_vocab()
+        or tokenizer_a.mask_token_id != tokenizer_b.mask_token_id
+    ):
+        raise ValueError("Homogeneous TSE requires matching token IDs and mask IDs")
     _validate_model(
         model_a,
         tokenizer_a,

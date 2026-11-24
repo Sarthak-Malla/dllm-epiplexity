@@ -11,8 +11,12 @@ from dllm.pipelines.tse.models import TSEConfig
 
 
 class FakeTokenizer:
-    def __init__(self, mask_token_id):
+    def __init__(self, mask_token_id, vocab=None):
         self.mask_token_id = mask_token_id
+        self.vocab = vocab
+
+    def get_vocab(self):
+        return self.vocab
 
     def __call__(self, text, **kwargs):
         return {"input_ids": [0], "offset_mapping": [(0, len(text))]}
@@ -52,6 +56,16 @@ def test_homogeneous_loading_still_rejects_unequal_vocabularies():
             FakeTokenizer(3),
             FakeTokenizer(4),
             ctca_enabled=False,
+        )
+
+
+def test_homogeneous_loading_rejects_equal_sized_vocab_with_different_ids():
+    with pytest.raises(ValueError, match="requires matching token IDs"):
+        _validate_compatibility(
+            FakeModel(4),
+            FakeModel(4),
+            FakeTokenizer(3, {"a": 0, "b": 1, "<mask>": 3}),
+            FakeTokenizer(3, {"a": 1, "b": 0, "<mask>": 3}),
         )
 
 

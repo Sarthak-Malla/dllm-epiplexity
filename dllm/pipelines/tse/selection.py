@@ -1,6 +1,25 @@
-"""Schedule-aware position selection and canvas commitment for TSE."""
+"""Schedule-aware position selection and canvas commitment for TSE.
+
+Run with: python -m pytest scripts/tests/test_tse_components.py
+"""
 
 import torch
+
+
+def generation_mask(
+    canvas: torch.Tensor,
+    prompt_lens: list[int] | tuple[int, ...],
+    generation_range: range,
+    mask_id: int,
+) -> torch.Tensor:
+    """Return unresolved generation slots within the requested logical range."""
+    positions = torch.arange(canvas.shape[1], device=canvas.device)
+    relative = positions - canvas.new_tensor(prompt_lens).unsqueeze(1)
+    return (
+        (canvas == mask_id)
+        & (relative >= generation_range.start)
+        & (relative < generation_range.stop)
+    )
 
 
 def select_positions(

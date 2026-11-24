@@ -12,14 +12,21 @@ import torch
 def logits_to_probabilities(
     logits: torch.Tensor,
     temperature: float = 1.0,
+    *,
+    allowed_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Convert logits to float32 probabilities with temperature scaling."""
+    """Temperature-scale logits over the allowed vocabulary in float32."""
     if temperature <= 0:
         raise ValueError("temperature must be positive")
-    if not torch.isfinite(logits).all():
-        raise ValueError("logits must contain only finite values")
-
-    probabilities = torch.softmax(logits.float() / temperature, dim=-1)
+    finite = torch.isfinite(logits)
+    if allowed_tokens is not None:
+        finite = finite | ~allowed_tokens
+    if not finite.all():
+        raise ValueError("allowed logits must contain only finite values")
+    scaled_logits = logits.float() / temperature
+    if allowed_tokens is not None:
+        scaled_logits.masked_fill_(~allowed_tokens, -torch.inf)
+    probabilities = torch.softmax(scaled_logits, dim=-1)
     if not torch.isfinite(probabilities).all():
         raise ValueError("temperature scaling produced non-finite probabilities")
     return probabilities
