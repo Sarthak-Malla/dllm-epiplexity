@@ -299,6 +299,34 @@ def test_ctca_consensus_prioritizes_agreement_over_fused_confidence(monkeypatch,
     assert len(consensus["decision"]) == len(confidence["decision"]) == 2
 
 
+def test_live_one_step_ablation_uses_fresh_canvas_for_remaining_steps(monkeypatch):
+    from scripts.tse.ctca import live_one_step_ablation as pilot
+
+    tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
+    sampler = CTCATSESampler(
+        FixedMaskedModel(5), FixedMaskedModel(5), tokenizer, tokenizer, "cpu", "cpu",
+        master_id="b", auxiliary_id="a", cache_dir=None, num_anchors=3, min_anchors=3,
+    )
+    monkeypatch.setattr(pilot, "GENERATION", {"max_new_tokens": 2, "steps": 2, "block_size": 2})
+
+    def aligned_probabilities(canvas, *_args, **_kwargs):
+        positions = (canvas == tokenizer.mask_token_id).nonzero(as_tuple=False)
+        if len(positions) == 2:
+            return (torch.tensor([[.6, .4, 0, 0, 0], [.55, .45, 0, 0, 0]]),
+                    torch.tensor([[0., 1., 0, 0, 0], [.55, .45, 0, 0, 0]]), positions)
+        winner = 2 if canvas[0, 1] == 1 else 0
+        probabilities = torch.zeros(1, 5)
+        probabilities[0, winner] = 1
+        return probabilities, probabilities.clone(), positions
+
+    monkeypatch.setattr(sampler, "_forward_aligned_probabilities", aligned_probabilities)
+    report, outputs = pilot.run_pair(sampler, torch.tensor([0]), torch.tensor([0]), "b", 1234)
+    assert report["noop_full_trajectory_matches"]
+    assert report["intervention"]["positions"] == [[0, 1]]
+    assert outputs["master"].tolist() == [0, 0, 0]
+    assert outputs["fusion"].tolist() == [0, 1, 2]
+
+
 def test_ctca_sampler_runs_unequal_vocabularies_and_commits_master_slots():
     master_tokenizer = CharacterTokenizer(["a", "b", "c"], "[MASK]", "[PAD]")
     auxiliary_tokenizer = CharacterTokenizer(

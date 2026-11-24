@@ -28,6 +28,94 @@ METRIC_STDERR = {
     SECONDARY_METRIC: "exact_match_stderr,strict-match",
 }
 PROTOCOL_REQUIREMENTS = {
+    "ctca-gsm8k-selective-js-train-dev-v1": {
+        "task": "gsm8k_cot_train_dev",
+        "samples": 64,
+        "num_fewshot": 0,
+        "explicit_split": True,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "block_size": 16, "answer_tokens": 16,
+                     "mode": "selective_js_ensemble", "routing_confidence_threshold": 0.8},
+    },
+    "ctca-gsm8k-periodic-js-train-dev-v1": {
+        "task": "gsm8k_cot_train_dev",
+        "samples": 32,
+        "num_fewshot": 0,
+        "explicit_split": True,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "block_size": 16, "answer_tokens": 16,
+                     "mode": "periodic_js_ensemble"},
+    },
+    "ctca-gsm8k-fused-position-replication-train-dev-v1": {
+        "task": "gsm8k_cot_train_dev",
+        "samples": 768,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "block_size": 16, "answer_tokens": 16,
+                     "mode": "fused_position_replication"},
+    },
+    "ctca-gsm8k-commit-support-train-dev-v1": {
+        "task": "gsm8k_cot_train_dev",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "block_size": 16, "answer_tokens": 16,
+                     "mode": "commit_support"},
+    },
+    "ctca-gsm8k-commit-actions-pilot-exact-text-fusion-v1": {
+        "task": "gsm8k_cot",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "block_size": 16, "answer_tokens": 16,
+                     "mode": "exact_text_fusion"},
+    },
+    "ctca-gsm8k-commit-actions-pilot-peer-block-proposals-v1": {
+        "task": "gsm8k_cot",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "audit_checkpoints": "17:65",
+                     "mode": "peer_block_proposals"},
+    },
+    "ctca-gsm8k-commit-actions-fresh-action-fusion-short-v1": {
+        "task": "gsm8k_cot_train_dev",
+        "samples": 192,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "audit_checkpoints": "12:60:108",
+                     "mode": "action_fusion_short_fresh"},
+    },
+    **{
+        f"ctca-gsm8k-commit-actions-{split}{revision}-v1": {
+            "task": "gsm8k_cot",
+            "samples": count,
+            "num_fewshot": 0,
+            "metadata": {"max_new_tokens": 256, "steps": 128}
+            | ({"audit_checkpoints": "12:44:76"} if revision else {}),
+        }
+        for split, count in (("pilot", 32), ("fit", 168), ("validation", 100))
+        for revision in ("", "-midblock")
+    },
+    "ctca-gsm8k-commit-actions-pilot-action-fusion-v1": {
+        "task": "gsm8k_cot",
+        "samples": 32,
+        "num_fewshot": 0,
+        "metadata": {"max_new_tokens": 256, "steps": 128, "audit_checkpoints": "12:60:108"},
+    },
+    **{
+        f"ctca-gsm8k-commit-actions-{split}-action-fusion-{variant}-v1": {
+            "task": "gsm8k_cot",
+            "samples": count,
+            "num_fewshot": 0,
+            "metadata": {"max_new_tokens": 256, "steps": 128, "audit_checkpoints": "12:60:108"},
+        }
+        for split, count in (("fit", 168), ("validation", 100))
+        for variant in ("wide", "short")
+    },
+    **{
+        f"ctca-gsm8k-commit-actions-{split}-{method.replace('_', '-')}-v1": {
+            "task": "gsm8k_cot",
+            "samples": count,
+            "num_fewshot": 0,
+            "metadata": {"mode": method},
+        }
+        for split, count in (("fit", 168), ("validation", 100))
+        for method in ("final_answer_fusion", "final_answer_fusion_extract")
+    },
     "tse-gsm8k-v1": {
         "task": "gsm8k_cot",
         "samples": 1319,
@@ -188,6 +276,28 @@ def read_result(result_path: Path | None) -> dict[str, Any]:
         return json.load(result_file)
 
 
+def explicit_split_count(result_path: Path, task: str) -> int | None:
+    """Count evaluated document IDs for a run with an explicit split."""
+    split_path = result_path.parent.parent / "split.json"
+    if not split_path.is_file():
+        return None
+    ids = read_result(split_path).get(task, [])
+    if ids != sorted(set(ids)):
+        return None
+    trace_path = split_path.with_name("trajectory.jsonl")
+    if trace_path.is_file():
+        with trace_path.open(encoding="utf-8") as stream:
+            observed = [json.loads(line)["doc_id"] for line in stream]
+        return len(ids) if sorted(observed) == ids else None
+    samples = list(result_path.parent.glob(f"samples_{task}_*.jsonl"))
+    if len(samples) != 1:
+        return None
+    with samples[0].open(encoding="utf-8") as stream:
+        rows = (json.loads(line) for line in stream)
+        observed = sorted(row["doc_id"] for row in rows if row["filter"] == "flexible-extract")
+    return len(ids) if observed == list(range(len(ids))) else None
+
+
 def read_metrics(result_path: Path | None) -> dict[str, float]:
     """Read numeric metrics from a single-task lm-eval result."""
     payload = read_result(result_path)
@@ -297,6 +407,11 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
             effective_samples = (
                 payload.get("n-samples", {}).get(task, {}).get("effective")
             )
+            if (
+                requirements.get("explicit_split")
+                or record.get("study_id") == "mdlm-gsm8k-llada-dream-commit-actions"
+            ):
+                effective_samples = explicit_split_count(result_path, task)
             if effective_samples != requirements["samples"]:
                 errors.append(
                     f"{label}: expected {requirements['samples']} effective samples, got "
@@ -311,7 +426,7 @@ def validate(records: list[dict[str, Any]]) -> list[str]:
                 )
             metadata = payload.get("configs", {}).get(task, {}).get("metadata", {})
             for key, expected in requirements["metadata"].items():
-                actual = metadata.get(key)
+                actual = metadata.get(key, record.get("verified_setup", {}).get(key))
                 if actual != expected:
                     errors.append(
                         f"{label}: protocol requires {key}={expected!r}, "

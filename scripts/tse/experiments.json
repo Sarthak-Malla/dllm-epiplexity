@@ -2,6 +2,1055 @@
   "schema_version": 1,
   "experiments": [
     {
+      "id": "ctca-gsm8k-dream-llada-selective-js-ensemble-pilot-20261124",
+      "status": "running",
+      "job_id": "432963",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "ctca-gsm8k-dream-llada-selective-js-ensemble-pilot-20261124",
+      "method": "selective_js_ensemble",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "owner_model": "dream",
+      "peer_model": "llada",
+      "protocol_id": "ctca-gsm8k-selective-js-train-dev-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_args": ["--selective-dream"],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-dream-llada-selective-js-ensemble-pilot-20261124/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-dream-llada-selective-js-ensemble-pilot-20261124/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "fusion": "exact_text_probability_mean",
+      "weighting": "projected_mass",
+      "alpha": 0.5,
+      "token_sampling_temperature": 0.0,
+      "probability_temperatures": [1.0, 1.0],
+      "commit_score": "selected_token_probability",
+      "routing_confidence_threshold": 0.8,
+      "notes": "Reverse the owner and peer on the same frozen 64 development questions. Dream owns reasoning positions and completes the answer. The paired report covers both native models and Dream-owned always-call and selective fusion."
+    },
+    {
+      "id": "ctca-gsm8k-llada-dream-selective-js-ensemble-pilot-20261124",
+      "status": "completed",
+      "job_id": "432899",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "ctca-gsm8k-llada-dream-selective-js-ensemble-pilot-20261124",
+      "method": "selective_js_ensemble",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-selective-js-train-dev-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_args": ["--selective"],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-llada-dream-selective-js-ensemble-pilot-20261124/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-llada-dream-selective-js-ensemble-pilot-20261124/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "fusion": "exact_text_probability_mean",
+      "weighting": "projected_mass",
+      "alpha": 0.5,
+      "token_sampling_temperature": 0.0,
+      "probability_temperatures": [1.0, 1.0],
+      "commit_score": "selected_token_probability",
+      "routing_confidence_threshold": 0.8,
+      "notes": "Compare selective and always-call JS fusion with both standalone models on 64 disjoint GSM8K training questions. The lm-eval output scores the selective branch. The paired report covers all four arms."
+    },
+    {
+      "id": "ctca-gsm8k-llada-dream-periodic-js-ensemble-pilot-20261124",
+      "status": "completed",
+      "job_id": "432695",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "ctca-gsm8k-llada-dream-periodic-js-ensemble-pilot-20261124",
+      "method": "periodic_js_ensemble",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-periodic-js-train-dev-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_periodic_js_ensemble_slurm.sh",
+      "submission_args": [],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-llada-dream-periodic-js-ensemble-pilot-20261124/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k-llada-dream-periodic-js-ensemble-pilot-20261124/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Periodic exact-text fusion with two independent reasoning steps, fixed LLaDA positions, and paired native and ungated controls on 32 disjoint GSM8K training questions. The lm-eval output represents the gated branch. The paired report covers all four arms."
+    },
+    {
+      "id": "ctca-gsm8k-replication-dream7bi-llada8bi-ens-st0p0-fused-position-20261123",
+      "status": "completed",
+      "job_id": "431372",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "fused_position_replication",
+      "models": [
+        "Dream-org/Dream-v0-Instruct-7B",
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-fused-position-replication-train-dev-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "replication",
+        "fused_position_replication"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/replication/fused_position_replication/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/replication/fused_position_replication/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Frozen Dream-owned max-fused ranking against both standalone models and two-sample Dream on 768 disjoint GSM8K training questions. Primary paired comparison against two-sample Dream."
+    },
+    {
+      "id": "ctca-gsm8k-support-dream7bi-llada8bi-ens-st0p0-commit-support-20261123",
+      "status": "completed",
+      "job_id": "430959",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "commit_support",
+      "models": [
+        "Dream-org/Dream-v0-Instruct-7B",
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-support-train-dev-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "support",
+        "commit_support"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/support/commit_support/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/support/commit_support/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Dream-owned live position fusion ranks the token actually written. Compare fused max rank, both standalone models, and a two-sample Dream control on 32 disjoint GSM8K training questions."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-exact-text-fusion-20261122",
+      "status": "completed",
+      "job_id": "428609",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "exact_text_fusion",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-exact-text-fusion-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "exact_text_fusion"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/exact_text_fusion/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/exact_text_fusion/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Online probability fusion on text-aligned positions, with paired token-only, position-only, and joint ablations. Report projection coverage, retained mass, paired answer changes, and per-model cost."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-peer-block-proposals-20261122",
+      "status": "completed",
+      "job_id": "428581",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "peer_block_proposals",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-peer-block-proposals-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "peer_block_proposals"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/peer_block_proposals/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/peer_block_proposals/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Matched next-block Dream proposals versus LLaDA resampling at steps 17 and 65. Report hindsight recoveries, harms, exact-text transfer coverage, and cost."
+    },
+    {
+      "id": "ctca-gsm8k-fresh-llada8bi-dream7bi-ens-st0p0-action-fusion-short-20261122",
+      "status": "completed",
+      "job_id": "428416",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion_short_fresh",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fresh-action-fusion-short-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fresh",
+        "action_fusion_short_fresh"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fresh/action_fusion_short_fresh/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fresh/action_fusion_short_fresh/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Fixed sample of 192 GSM8K train questions. Freeze score scales from short-action fit job 428334. Generate full reference rollouts for evaluation."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-action-fusion-short-20261121",
+      "status": "completed",
+      "job_id": "428334",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion_short",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-action-fusion-short-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "action_fusion_short"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/action_fusion_short/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/action_fusion_short/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Fit rerun 428334 completed all 168 rows and reproduced all 129 rows saved before the original GPU-memory failure in job 426574."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-action-fusion-short-20261121",
+      "status": "completed",
+      "job_id": "426575",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion_short",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-action-fusion-short-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "action_fusion_short"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/action_fusion_short/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/action_fusion_short/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Compare usual action with defer-two. Score active-block lookahead and archived full branches with the extracted-answer verifier. Selectors are evaluated offline."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-final-answer-fusion-extract-20261121",
+      "status": "completed",
+      "job_id": "426545",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "final_answer_fusion_extract",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-final-answer-fusion-extract-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "final_answer_fusion_extract"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/final_answer_fusion_extract/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/final_answer_fusion_extract/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Mask the benchmark-extracted number in each saved candidate before scoring. No generation. Use the paired report for selection."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-final-answer-fusion-extract-20261121",
+      "status": "completed",
+      "job_id": "426546",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "final_answer_fusion_extract",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-final-answer-fusion-extract-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "final_answer_fusion_extract"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/final_answer_fusion_extract/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/final_answer_fusion_extract/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Mask the benchmark-extracted number in each saved candidate before scoring. No generation. Use the paired report for selection."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-final-answer-fusion-20261121",
+      "status": "completed",
+      "job_id": "426502",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "final_answer_fusion",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-final-answer-fusion-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "final_answer_fusion"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/final_answer_fusion/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/final_answer_fusion/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Rescore existing independent responses; no generation. The lm-eval score is the stored LLaDA branch. Use the paired report for selection."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-final-answer-fusion-20261121",
+      "status": "completed",
+      "job_id": "426503",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "final_answer_fusion",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-final-answer-fusion-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "final_answer_fusion"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/final_answer_fusion/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/final_answer_fusion/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Rescore existing independent responses; no generation. The lm-eval score is the stored LLaDA branch. Use the paired report for selection."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-action-fusion-wide-20261120",
+      "status": "completed",
+      "job_id": "424501",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion_wide",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-action-fusion-wide-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "action_fusion_wide"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/action_fusion_wide/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/action_fusion_wide/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Three fixed LLaDA commitment alternatives at steps 12, 60 and 108. Compare LLaDA-only, Dream-only and fused scores from the same paired trace."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-action-fusion-wide-20261120",
+      "status": "completed",
+      "job_id": "424502",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion_wide",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-action-fusion-wide-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "action_fusion_wide"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/action_fusion_wide/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/action_fusion_wide/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Three fixed LLaDA commitment alternatives at steps 12, 60 and 108. Compare LLaDA-only, Dream-only and fused scores from the same paired trace."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-action-fusion-20261120",
+      "status": "completed",
+      "job_id": "424449",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "action_fusion",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-action-fusion-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "action_fusion"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/action_fusion/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/action_fusion/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Training-free paired diagnostic at steps 12, 60 and 108. The lm-eval score is the unmodified LLaDA branch. Use the paired trace to evaluate fusion."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-shared-disagreement-midblock-20261120",
+      "status": "completed",
+      "job_id": "423992",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit_midblock",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-midblock-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "shared_audit_midblock"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/shared_audit_midblock/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/shared_audit_midblock/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Probe steps 12, 44 and 76, where masks outnumber the commitment budget. Intervention outcomes are in the trace."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-shared-disagreement-midblock-20261120",
+      "status": "completed",
+      "job_id": "424098",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit_midblock",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-midblock-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "shared_audit_midblock"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/shared_audit_midblock/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/shared_audit_midblock/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Probe steps 12, 44 and 76, where masks outnumber the commitment budget. Intervention outcomes are in the trace."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-shared-disagreement-midblock-20261120",
+      "status": "completed",
+      "job_id": "424099",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit_midblock",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-midblock-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "shared_audit_midblock"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/shared_audit_midblock/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/shared_audit_midblock/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Probe steps 12, 44 and 76, where masks outnumber the commitment budget. Intervention outcomes are in the trace."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-shared-disagreement-20261120",
+      "status": "completed",
+      "job_id": "423957",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "shared_audit"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/shared_audit/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/shared_audit/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Shared-canvas disagreement diagnostic. The lm-eval headline scores the unmodified LLaDA continuation; the trajectory trace and shared-audit report contain the intervention results."
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-shared-disagreement-20261120",
+      "status": "cancelled",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "shared_audit"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/shared_audit/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/shared_audit/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Shared-canvas disagreement diagnostic. The lm-eval headline scores the unmodified LLaDA continuation; the trajectory trace and shared-audit report contain the intervention results."
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-shared-disagreement-20261120",
+      "status": "cancelled",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "shared_audit",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "shared_audit"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/shared_audit/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/shared_audit/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0,
+      "notes": "Shared-canvas disagreement diagnostic. The lm-eval headline scores the unmodified LLaDA continuation; the trajectory trace and shared-audit report contain the intervention results."
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-single-st0p0-llada-20261120",
+      "status": "completed",
+      "job_id": "423396",
+      "verified_setup": {"max_new_tokens": 256, "steps": 128},
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "llada",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "llada"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/llada/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/llada/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-pilot-dream7bi-single-st0p0-dream-20261120",
+      "status": "completed",
+      "job_id": "423747",
+      "verified_setup": {"max_new_tokens": 256, "steps": 128},
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "dream",
+      "models": [
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "dream"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/dream/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/dream/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-postselect-20261120",
+      "status": "completed",
+      "job_id": "423748",
+      "verified_setup": {"max_new_tokens": 256, "steps": 128},
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "post_generation",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "post_generation"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/post_generation/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/post_generation/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-pilot-llada8bi-dream7bi-ens-st0p0-relay16-20261120",
+      "status": "completed",
+      "job_id": "423696",
+      "verified_setup": {"max_new_tokens": 256, "steps": 128},
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "relay",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-pilot-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "pilot",
+        "relay"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/relay/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/pilot/relay/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-paired-span-20261120",
+      "status": "completed",
+      "job_id": "423785",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "diagnostic",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "diagnostic"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/diagnostic/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/diagnostic/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-fit-llada8bi-dream7bi-ens-st0p0-paired-swap-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "schedule_diagnostic",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-fit-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "fit",
+        "schedule_diagnostic"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/schedule_diagnostic/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/fit/schedule_diagnostic/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-paired-span-20261120",
+      "status": "completed",
+      "job_id": "423786",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "diagnostic",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "diagnostic"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/diagnostic/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/diagnostic/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-paired-swap-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "schedule_diagnostic",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "schedule_diagnostic"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/schedule_diagnostic/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/schedule_diagnostic/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-single-st0p0-llada-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "llada",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "llada"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/llada/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/llada/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-dream7bi-single-st0p0-dream-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "dream",
+      "models": [
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "dream"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/dream/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/dream/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-single-st0p0-native-llada-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "native_llada",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "native_llada"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/native_llada/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/native_llada/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-dream7bi-single-st0p0-native-dream-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "native_dream",
+      "models": [
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "native_dream"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/native_dream/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/native_dream/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-relay16-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "relay",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "relay"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/relay/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/relay/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-postselect-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "post_generation",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "post_generation"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/post_generation/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/post_generation/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-exactmass-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "exact",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "exact"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/exact/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/exact/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-span-master-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "llada_verifier",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "llada_verifier"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/llada_verifier/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/llada_verifier/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-span-text-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "text",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "text"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/text/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/text/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-span-order-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "positions",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "positions"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/positions/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/positions/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-span-joint-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "joint",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "joint"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/joint/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/joint/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-dream7bi-ens-st0p0-probmean-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "ctca",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct",
+        "Dream-org/Dream-v0-Instruct-7B"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "ctca"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/ctca/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/ctca/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
+      "id": "ctca-gsm8k-validation-llada8bi-single-greedy-st0p3-sample-select-20261120",
+      "status": "planned",
+      "group": "ctca",
+      "study_id": "mdlm-gsm8k-llada-dream-commit-actions",
+      "method": "multi",
+      "models": [
+        "GSAI-ML/LLaDA-8B-Instruct"
+      ],
+      "protocol_id": "ctca-gsm8k-commit-actions-validation-v1",
+      "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tie/commit_actions_slurm.sh",
+      "submission_args": [
+        "validation",
+        "multi"
+      ],
+      "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/multi/*/*/results_*.json",
+      "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/mdlm-gsm8k-llada-dream-commit-actions/validation/multi/*/*/samples_*.jsonl",
+      "batch_size": 1,
+      "num_fewshot": 0
+    },
+    {
       "id": "ctca-gsm8k300-lladamaster-exactshared-ptb1p0-20261029",
       "status": "completed",
       "group": "ctca",
@@ -882,7 +1931,7 @@
     },
     {
       "id": "ctca-humaneval-llada8bi-dream7bi-lladamaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-humaneval-exactshared-endpoints-20261104",
       "method": "ctca_probability_fusion",
@@ -891,7 +1940,9 @@
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_lladamaster_exactshared.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_humaneval_parity_slurm.sh",
       "job_bundle": "ctca-humaneval-exactshared-endpoints",
-      "job_id": null,
+      "job_id": "369394",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-04",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104",
@@ -910,7 +1961,7 @@
     },
     {
       "id": "ctca-humaneval-llada8bi-dream7bi-dreammaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-humaneval-exactshared-endpoints-20261104",
       "method": "ctca_probability_fusion",
@@ -919,7 +1970,9 @@
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_dreammaster_exactshared.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_humaneval_parity_slurm.sh",
       "job_bundle": "ctca-humaneval-exactshared-endpoints",
-      "job_id": null,
+      "job_id": "369395",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-04",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-ens-pta1p0-ptb1p0-w0p5-probmean-confrank-20261104",
@@ -938,7 +1991,7 @@
     },
     {
       "id": "ctca-humaneval-llada8bi-dream7bi-lladamaster-a1-endpoint-pta1p0-ptb1p0-confrank-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-humaneval-exactshared-endpoints-20261104",
       "method": "ctca_llada_master_endpoint_control",
@@ -947,7 +2000,9 @@
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_lladamaster_alpha1_endpoint.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_humaneval_parity_slurm.sh",
       "job_bundle": "ctca-humaneval-exactshared-endpoints",
-      "job_id": null,
+      "job_id": "369396",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-05",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-a1-endpoint-pta1p0-ptb1p0-confrank-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-a1-endpoint-pta1p0-ptb1p0-confrank-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-lladamaster-a1-endpoint-pta1p0-ptb1p0-confrank-20261104",
@@ -966,7 +2021,7 @@
     },
     {
       "id": "ctca-humaneval-llada8bi-dream7bi-dreammaster-a0-endpoint-pta1p0-ptb1p0-confrank-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-humaneval-exactshared-endpoints-20261104",
       "method": "ctca_dream_master_endpoint_control",
@@ -975,7 +2030,9 @@
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_humaneval_dreammaster_alpha0_endpoint.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_humaneval_parity_slurm.sh",
       "job_bundle": "ctca-humaneval-exactshared-endpoints",
-      "job_id": null,
+      "job_id": "369397",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-05",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-a0-endpoint-pta1p0-ptb1p0-confrank-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-a0-endpoint-pta1p0-ptb1p0-confrank-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-humaneval-exactshared-v1/ctca-humaneval-llada8bi-dream7bi-dreammaster-a0-endpoint-pta1p0-ptb1p0-confrank-20261104",
@@ -994,7 +2051,7 @@
     },
     {
       "id": "ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-gsm8k300-dualmaster-jsrank-20261117",
       "method": "ctca_probability_fusion",
@@ -1005,7 +2062,9 @@
       "protocol_id": "ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1",
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_lladamaster_jsrank_at0p03_pt0p10.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_lladamaster_jsrank_at0p03_pt0p10_slurm.sh",
-      "job_id": null,
+      "job_id": "415139",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "started_at": "2026-11-17",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-lladamaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117",
@@ -1023,11 +2082,11 @@
       ],
       "commit_score": "confidence_times_agreement",
       "batch_size": 8,
-      "notes": "GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule. Changes only remasking from low_confidence to consensus relative to matching at0p03/pt0p10 confidence control. Exact-shared sparse_topk projection, all anchors, top-k 64, anchor temperature 0.03 and projection temperature 0.10. JS agreement is 1 - weighted_JS / weight_entropy; commit score is fused top probability times agreement."
+      "notes": "GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule. The saved scientific model arguments differ from the matched confidence control only in remasking. Exact-shared sparse_topk projection, all anchors, top-k 64, anchor temperature 0.03 and projection temperature 0.10. The commit score is fused top probability times normalized JS agreement. Earlier attempt 414544 has startup logs without a saved result or confirmed terminal status."
     },
     {
       "id": "ctca-gsm8k300-llada8bi-dream7bi-dreammaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-gsm8k300-dualmaster-jsrank-20261117",
       "method": "ctca_probability_fusion",
@@ -1038,7 +2097,9 @@
       "protocol_id": "ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1",
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_dreammaster_jsrank_at0p03_pt0p10.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_dreammaster_jsrank_at0p03_pt0p10_slurm.sh",
-      "job_id": null,
+      "job_id": "415140",
+      "git_commit": "3e85e18d8de4fcf82839db0496204559d7935550",
+      "started_at": "2026-11-17",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-dreammaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-dreammaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-gsm8k300-dualmaster-jsrank-at0p03-projtemp0p10-v1/ctca-gsm8k300-llada8bi-dream7bi-dreammaster-a5-b0-static-st0p0-pta1p0-ptb1p0-w0p5-probmean-jsrank-at0p03-projtemp0p10-20261117",
@@ -1056,11 +2117,11 @@
       ],
       "commit_score": "confidence_times_agreement",
       "batch_size": 8,
-      "notes": "GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule. Changes only remasking from low_confidence to consensus relative to matching at0p03/pt0p10 confidence control. Exact-shared sparse_topk projection, all anchors, top-k 64, anchor temperature 0.03 and projection temperature 0.10. JS agreement is 1 - weighted_JS / weight_entropy; commit score is fused top probability times agreement."
+      "notes": "GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule. The saved scientific model arguments differ from the matched confidence control only in remasking. Exact-shared sparse_topk projection, all anchors, top-k 64, anchor temperature 0.03 and projection temperature 0.10. The commit score is fused top probability times normalized JS agreement. Earlier attempt 414545 has startup logs without a saved result or confirmed terminal status."
     },
     {
       "id": "ctca-gsm8k300-lladamaster-at0p03-pt0p10-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-gsm8k4-anchor-projection-temp-sweep-20261104",
       "method": "ctca_probability_fusion",
@@ -1071,7 +2132,9 @@
       "protocol_id": "ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1",
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_lladamaster_at0p03_pt0p10.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_lladamaster_at0p03_pt0p10_slurm.sh",
-      "job_id": null,
+      "job_id": "368727",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-04",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-lladamaster-at0p03-pt0p10-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-lladamaster-at0p03-pt0p10-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-lladamaster-at0p03-pt0p10-20261104",
@@ -1089,11 +2152,11 @@
       ],
       "commit_score": "selected_token_probability",
       "batch_size": 8,
-      "notes": "Approved tuned sparse-projection confidence control: GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule, static alpha 0.5, exact-shared sparse_topk with all anchors and top-k 64, anchor temperature 0.03 and projection temperature 0.10. Submission and result status are unverified."
+      "notes": "Approved tuned sparse-projection confidence control: GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule, static alpha 0.5, exact-shared sparse_topk with all anchors and top-k 64, anchor temperature 0.03 and projection temperature 0.10."
     },
     {
       "id": "ctca-gsm8k300-dreammaster-at0p03-pt0p10-20261104",
-      "status": "planned",
+      "status": "completed",
       "group": "ctca",
       "study_id": "ctca-gsm8k4-anchor-projection-temp-sweep-20261104",
       "method": "ctca_probability_fusion",
@@ -1104,7 +2167,9 @@
       "protocol_id": "ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1",
       "config_path": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/configs/ctca_gsm8k300_dreammaster_at0p03_pt0p10.conf",
       "submission_script": "/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/ctca_gsm8k300_dreammaster_at0p03_pt0p10_slurm.sh",
-      "job_id": null,
+      "job_id": "368728",
+      "git_commit": "0f7974832d4f277cf7ad170ff94155af67402e0d",
+      "started_at": "2026-11-04",
       "result_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-dreammaster-at0p03-pt0p10-20261104/*/results_*.json",
       "samples_glob": "/home/juan.guevara/naruto/dllm-epiplexity/.logs/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-dreammaster-at0p03-pt0p10-20261104/*/samples_*.jsonl",
       "response_cache": "/home/juan.guevara/naruto/dllm-epiplexity/.cache/lm_eval_responses/ctca-gsm8k300-dualmaster-sparse-at0p03-pt0p10-v1/ctca-gsm8k300-dreammaster-at0p03-pt0p10-20261104",
@@ -1122,7 +2187,7 @@
       ],
       "commit_score": "selected_token_probability",
       "batch_size": 8,
-      "notes": "Approved tuned sparse-projection confidence control: GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule, static alpha 0.5, exact-shared sparse_topk with all anchors and top-k 64, anchor temperature 0.03 and projection temperature 0.10. Submission and result status are unverified."
+      "notes": "Approved tuned sparse-projection confidence control: GSM8K first 300, LLaDA five-shot / Dream zero-shot, 512/128/32 schedule, static alpha 0.5, exact-shared sparse_topk with all anchors and top-k 64, anchor temperature 0.03 and projection temperature 0.10."
     }
   ]
 }

@@ -11,9 +11,9 @@ are committed.
 This document defines research questions rather than runnable experiments. Before
 launching a study, create a named experiment and immutable configuration following
 the conventions in
-[`/home/sarthak.malla/dllm-epiplexity/scripts/tse/EXPERIMENTS.md`](/home/sarthak.malla/dllm-epiplexity/scripts/tse/EXPERIMENTS.md),
+[EXPERIMENTS.md](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/EXPERIMENTS.md),
 and record it in
-[`/home/sarthak.malla/dllm-epiplexity/scripts/tse/experiments.json`](/home/sarthak.malla/dllm-epiplexity/scripts/tse/experiments.json).
+[experiments.json](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/experiments.json).
 
 ## Common experimental principles
 
@@ -252,3 +252,136 @@ budget; otherwise describe it as test-time scaling for quality.
 
 This order avoids spending full-generation compute on mechanisms for which there
 is no measurable complementarity or reliable online selection signal.
+
+## Focused follow-up after the CTCA results audit
+
+The paired GSM8K results disfavor ranking 50/50 fused proposals by normalized
+JS agreement under the tested setup. HumanEval also shows a net loss from
+static CTCA fusion in both master directions. The endpoints solve different
+GSM8K questions, so model diversity still merits testing. The immediate
+question is whether a second denoiser can identify a **local change worth
+making to a partially decoded sequence**. The current benchmarks mix
+changes to token identity with changes to commitment order. [Results audit](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/EXPERIMENTS.md)
+
+### What the implementation measures
+
+- The auxiliary canvas retokenizes each committed run and puts one auxiliary
+  mask at each open master slot. This preserves a logical position only. A
+  single mask for a two-token native spelling asks a different conditional
+  question. Committing and merging runs may also shift downstream auxiliary
+  indices. For GSM8K, LLaDA's five-shot prompt and Dream's zero-shot prompt
+  provide different conditioning even when sampled text matches. [Canvas construction](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/ctca/canvas.py:212), [prompt construction](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/eval.py:343)
+- `exact_shared` overwrites shared ordinary vocabulary rows using raw
+  token strings. Unshared and special rows keep the anchor-based fallback.
+  Spatial weighting, many-to-one mappings, and subsequent normalization can
+  distort confidence. The `centimeters` → `kilometers` trace identifies a
+  concrete invalid substitution. The smaller-anchor replays corrected the
+  unit but still gave the wrong answer, showing that valid mappings and
+  useful reasoning interventions need their own measurements. [Exact-shared policy](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/ctca/relative.py:33), [projection trace](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/EXPERIMENTS.md:1366)
+- JS compares master probabilities with projected auxiliary probabilities
+  before master-token suppression, while the fused proposal and its
+  confidence use the suppressed distribution. It changes the rank of
+  positions and leaves the greedy fused proposal at each position intact
+  for a fixed canvas. The schedule still requires a fixed number of commits
+  per step. In particular, a low score offers no master fallback when a
+  contested position must be filled. [Fusion and ranking](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/ctca_sampler.py:692), [fixed-count selection](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/selection.py:56)
+- The current live probe supports a single proposal substitution on
+  master-selected positions and then continues under the master policy. The
+  first admissible disagreement is a feasibility target. Its two
+  continuations demonstrate trajectory sensitivity, including changed
+  rationale quality with unchanged numeric exact match. To measure useful
+  disagreement, sample target states across mask fraction and disagreement
+  strata using only features available at intervention time. [Live probe](/home/juan.guevara/naruto/dllm-epiplexity/scripts/tse/ctca/live_one_step_ablation.py:57)
+- The original same-checkpoint temperature blend is a scheduling control.
+  When both members receive identical logits, each positive softmax
+  temperature preserves token order, and an arithmetic mix of the two
+  probability vectors preserves that order as well. Across-position
+  confidence can still change. Also, the same-tokenizer sampler currently
+  records JS as a diagnostic and ranks by fused confidence. A clean test
+  of model diversity needs genuinely different checkpoints. [Same-tokenizer sampler](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/sampler.py:185)
+
+### Where the related methods act
+
+| Method | Unit of combination | Implication for this study |
+|---|---|---|
+| AR vocabulary alignment | DEEPEN maps next-token distributions through relative representations. EVA aligns vocabulary distributions and filters suspect contributors. | Use approximate vocabulary alignment as a baseline and measure it independently from commitment order. [DEEPEN](https://proceedings.neurips.cc/paper_files/paper/2024/file/d8a6eb79f8ccaacbe7198a5caf3a0323-Paper-Conference.pdf), [EVA](https://arxiv.org/abs/2404.09492) |
+| AR string and byte alignment | Wicks et al. enforce surface agreement during generation. Phan et al. derive next-byte conditionals. SweetSpan cross-scores spans extending a prefix. | Shared text and native rescoring transfer as design ideas. Exact next-byte conversion relies on the AR prefix factorization. [Token-level Ensembling](https://arxiv.org/abs/2502.21265), [Exact Byte-Level Probabilities](https://arxiv.org/abs/2410.09303), [SweetSpan](https://arxiv.org/abs/2409.18583) |
+| Output selection | Self-consistency votes over answers from multiple samples. LLM-Blender ranks and fuses complete candidate outputs. | Keep a same-budget stronger-model multi-sample baseline and a heterogeneous output selector that uses a frozen answer-agnostic rule. [Self-Consistency](https://arxiv.org/abs/2203.11171), [LLM-Blender](https://arxiv.org/abs/2306.02561) |
+| Masked diffusion ensembles and search | TIE cross-scores partial trajectories and relays one winner wholesale. UnMaskFork branches on denoising actions and can switch tokenizers across models. | Compare against a matched trajectory relay. TIE reports 83.62% GSM8K for entropy relay versus 78.77% for its best constituent. Its setup uses LLaDA-1.5 and Dream, so its published scores serve as evidence for the baseline rather than a comparison with our runs. [TIE](https://arxiv.org/html/2606.16281v1#S5), [UnMaskFork](https://arxiv.org/html/2602.04344v2) |
+| Masked diffusion planning and verification | Path Planning separates position planning from denoising. LookUM evaluates unmasking paths with lookahead uncertainty. Plan-Verify-Fill selectively verifies tentative commitments against the decoding backbone. BMC reconstructs reasoning and answers for single-model self-verification. | Test position policy and lookahead in isolation. The contribution would need to come from the joint use of heterogeneous, cross-tokenizer evidence about the same gap. [Path Planning](https://arxiv.org/abs/2502.03540), [LookUM](https://arxiv.org/abs/2511.05563), [Plan, Verify and Fill](https://aclanthology.org/2026.findings-emnlp.1119/), [BMC](https://proceedings.mlr.press/v306/ruan26a.html) |
+
+Commitment delay and counterfactual repair also have direct precedents.
+Answer First, Reason Later studies delaying answer positions. LOCKR uses
+targeted remasking and counterfactual continuations to repair lock-in.
+Deferral and lookahead therefore need equally budgeted single-model controls.
+[Answer First, Reason Later](https://arxiv.org/abs/2608.05687), [LOCKR](https://arxiv.org/abs/2609.27220)
+
+### Proposed method
+
+Use **cross-model verification of local masked spans**, with an explicit
+choice to commit the proposed replacement, keep the master proposal, or
+defer the gap. The research hypothesis is that a cross-model verifier can
+identify edits with positive downstream value that a master-only verifier
+misses at matched compute. The targeted literature search found trajectory
+relay, action branching, and self-verification as precedents. A possible
+contribution is cross-tokenizer verification of competing local edits to the
+same partially observed text under a fixed commitment budget.
+
+1. **Measure probability mass on exact matches.** Start with ordinary,
+   context-verified single-token matches and exclude special tokens from
+   auxiliary evidence. Keep unmatched mass explicit. For master distribution
+   `p`, exact projected subdistribution `r` of total mass `m`, and auxiliary
+   weight `λ`, use `q = (1 − λm)p + λr`. A row with no exact support equals
+   the master distribution. Measure retained mass and changed selected
+   proposals by model direction, block, mask fraction, and token class.
+2. **Compare completions of the same bounded gap.** Start with short,
+   currently masked regions with verifiable text boundaries and at most the
+   scheduled master commit count. Build a small union of native candidates and
+   always include the master completion. Recreate identical visible text on
+   both canvases and represent the gap with each tokenizer's required mask
+   count. Keep candidate lengths matched within each model in the first test.
+   Check neighboring token boundaries by in-context round trip. Score
+   candidate-relative margins in each model using a predeclared within-gap
+   reveal order and calibrate them on development data. A sum of conditional
+   log scores along one order is a path score. The score can vary with reveal
+   order and mask count.
+3. **Test what the candidate changes.** Branch from identical pre-commit
+   canvases. Replace a span atomically only when the verifier accepts it.
+   For deferral, spend the same number of slots on other eligible positions
+   and use the master choice when the budget forces a decision. In the
+   diagnostic, roll out each branch with fresh forwards under the same
+   continuation policy and label its final task result. As an online feature,
+   test a bounded lookahead that checks remaining masks after inserting each
+   candidate. Compare it with native gap scores before adding extra forwards
+   to the production policy. Calibrate acceptance against the observed
+   probability of helping minus the probability of harming, relative to the
+   master branch. Compare rules at the same intervention rate.
+
+### Evidence required to keep developing the method
+
+1. **Reproduce the controls.** Pin the code and checkpoint revisions,
+   batch composition, precision, prompt bytes, suppression, and decode
+   schedule. Check selected positions and text at the first divergence.
+   Use both true single-model controls and both CTCA endpoint controls.
+   The endpoint path currently forwards both models even at zero auxiliary
+   weight. Evaluate with matched semantic prompts as well as the current
+   model-specific prompt policy. [CTCA forward path](/home/juan.guevara/naruto/dllm-epiplexity/dllm/pipelines/tse/ctca_sampler.py:335)
+2. **Use paired interventions to identify the source of any gain.** Compare
+   master, exact-mass fallback, local span scoring with the master alone,
+   and cross-model span scoring, initially with master-selected positions.
+   Then cross proposal choices with fixed-budget deferral. Include a
+   shuffled-deferral control at the same rate. Report candidate eligibility,
+   retained mass, intervention rate, gains and harms per override, and
+   first divergent commitments. Put every state from the same prompt on the
+   same side of the calibration split. Use teacher-forced corruptions for
+   lexical diagnostics and final outcomes to evaluate free-generation edits.
+3. **Run one frozen evaluation once the signal survives the diagnostic.**
+   Use untouched GSM8K questions and confirm on an external reasoning
+   benchmark. Reserve HumanEval as a separate code outcome with its own
+   fixed protocol. Primary outcome is paired flexible exact match against
+   the stronger native model and a compute-matched output selection control.
+   Compare with tuned confidence CTCA, JS rank, and TIE or a documented
+   budget-matched relay adaptation. Report protocol-specific confidence
+   intervals, forward calls by model, processed tokens, latency, and
+   GPU-hours. A small pilot can reject a mechanism or estimate the size of a
+   confirmatory study. Test-set tuning cannot establish an accuracy gain.

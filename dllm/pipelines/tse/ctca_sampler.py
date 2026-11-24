@@ -508,8 +508,16 @@ class CTCATSESampler:
         master_suppress_tokens: tuple[int, ...] | list[int] | None = None,
         master_begin_suppress_tokens: tuple[int, ...] | list[int] | None = None,
         trace_callback: Callable[[str, dict], None] | None = None,
+        commit_probe: Callable[
+            [tuple[int, int], torch.Tensor, torch.Tensor, torch.Tensor], str | None
+        ] | None = None,
     ) -> torch.Tensor:
-        """Generate on the master grid while projecting the auxiliary model."""
+        """Generate on the master grid while projecting the auxiliary model.
+
+        The optional probe sees the step, master-selected positions, master IDs,
+        and 50/50 fusion IDs. Return ``fusion`` to substitute the latter IDs,
+        or ``master``/None to keep the original IDs. Positions stay fixed.
+        """
         if not inputs:
             raise ValueError("CTCATSESampler.sample requires at least one input")
         if steps < 1 or block_size < 1 or max_new_tokens < 1:
@@ -522,6 +530,11 @@ class CTCATSESampler:
             raise ValueError(f"Unsupported remasking strategy: {remasking}")
         if remasking == "consensus" and selection_mode != "tse":
             raise ValueError("consensus remasking requires selection_mode='tse'")
+        if commit_probe is not None and (
+            selection_mode != "baseline" or baseline_model != self.master_id
+            or remasking != "low_confidence" or temperature != 0 or stochastic_transfer
+        ):
+            raise ValueError("commit_probe requires greedy master baseline with deterministic transfers")
         if weighting_mode not in {"static", "online_entropy", "per_token_margin"}:
             raise ValueError(
                 "weighting_mode must be 'static', 'online_entropy', "
@@ -847,6 +860,33 @@ class CTCATSESampler:
                         mask_index.nonzero(as_tuple=False),
                         transfer_counts[:, step_index],
                     )
+                    if commit_probe is not None and selected_tokens.numel():
+                        width = canvas.shape[1]
+                        active = active_positions.to(master_probabilities.device)
+                        selected = selected_positions.to(active.device)
+                        # active_positions follows row-major order from nonzero().
+                        rows = torch.searchsorted(
+                            active[:, 0] * width + active[:, 1],
+                            selected[:, 0] * width + selected[:, 1],
+                        )
+                        probe_probabilities = suppress_token_probabilities(
+                            (master_probabilities[rows] + auxiliary_probabilities[rows]) / 2,
+                            master_suppress_tokens,
+                        )
+                        fusion_tokens = probe_probabilities.argmax(dim=-1).to(selected_tokens.device)
+                        invalid = fusion_tokens == self.master_tokenizer.mask_token_id
+                        if master_begin_suppress_tokens:
+                            invalid |= torch.isin(
+                                fusion_tokens, fusion_tokens.new_tensor(master_begin_suppress_tokens)
+                            )
+                        fusion_tokens = torch.where(invalid, selected_tokens, fusion_tokens)
+                        action = commit_probe(
+                            (block_index, step_index), selected_positions, selected_tokens, fusion_tokens
+                        )
+                        if action == "fusion":
+                            selected_tokens = fusion_tokens
+                        elif action not in (None, "master"):
+                            raise ValueError(f"Unknown commit_probe action: {action!r}")
                     selection_ranks = torch.full(
                         scores.shape,
                         -1,

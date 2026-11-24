@@ -16,12 +16,17 @@ _LOGGER = logging.getLogger(__name__)
 _HUMANEVAL_RUNNING_DISABLED = False
 
 
+def gsm8k_answer_span(text: str) -> tuple[int, int] | None:
+    """Locate the last match of the GSM8K flexible-extract pattern."""
+    matches = list(_GSM8K_NUMBER.finditer(text))
+    return matches[-1].span() if matches else None
+
+
 def _last_gsm8k_number(text: str) -> str:
-    matches = _GSM8K_NUMBER.findall(text)
-    if not matches:
+    span = gsm8k_answer_span(text)
+    if span is None:
         return ""
-    groups = matches[-1]
-    value = next((group for group in groups if group), "")
+    value = text[span[0]:span[1]]
     return value.replace(",", "").replace("$", "").removesuffix(".")
 
 
